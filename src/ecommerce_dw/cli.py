@@ -33,6 +33,8 @@ from ecommerce_dw.dws import builder as dws_builder
 from ecommerce_dw.incremental import IncrementalError, init_watermark, run_incremental
 from ecommerce_dw.incremental.planner import compute_frontier
 from ecommerce_dw.incremental.watermark import DEFAULT_PIPELINE, WatermarkRepo
+from ecommerce_dw.ops.control import finish_run, plan_and_register
+from ecommerce_dw.ops.validate import check_source_files, validate_ods
 from ecommerce_dw.quality import (
     QualityGateError,
     build_rule_catalog,
@@ -242,6 +244,79 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 6: Airflow orchestration helpers (check-sources / validate-ods /     #
+#          batch-register / batch-finish)                                      #
+# --------------------------------------------------------------------------- #
+
+
+def _cmd_check_sources(args: argparse.Namespace) -> int:
+    findings = check_source_files(PROJECT_ROOT)
+    worst = 0
+    for f in findings:
+        print(f"{'OK  ' if f.ok else 'FAIL'} {f.file:<32} {f.message}")
+        if not f.ok:
+            worst = 2
+    print(
+        f"--- check-sources: {sum(1 for f in findings if f.ok)} ok, "
+        f"{sum(1 for f in findings if not f.ok)} failed"
+    )
+    return worst
+
+
+def _cmd_validate_ods(args: argparse.Namespace) -> int:
+    cfg = _build_config()
+    findings = validate_ods(cfg, PROJECT_ROOT)
+    ok = True
+    for f in findings:
+        print(f"{'OK  ' if f.ok else 'FAIL'} {f.file:<32} {f.message}")
+        ok = ok and f.ok
+    print(
+        f"--- validate-ods: {sum(1 for f in findings if f.ok)} ok, "
+        f"{sum(1 for f in findings if not f.ok)} failed"
+    )
+    return 0 if ok else 2
+
+
+def _cmd_batch_register(args: argparse.Namespace) -> int:
+    cfg = _build_config()
+    result = plan_and_register(
+        cfg,
+        mode=args.mode,
+        window=args.window,
+        dag_run_id=args.dag_run,
+        pipeline=args.pipeline,
+    )
+    print(
+        f"control run: batch_id={result['batch_id']} mode={result['mode']} "
+        f"window={result['window']} pipeline={args.pipeline} "
+        f"dwd_dates={result['dwd_dates'] or '(none)'} "
+        f"agg_dates={result['agg_dates'] or '(none)'}"
+    )
+    print(f"BATCH_ID={result['batch_id']}")
+    return 0
+
+
+def _cmd_batch_finish(args: argparse.Namespace) -> int:
+    cfg = _build_config()
+    finish_run(
+        cfg,
+        args.batch,
+        args.status,
+        published=args.published,
+        publish_id=args.publish_id,
+        quality_run_id=args.quality_run,
+        error_summary=args.error,
+    )
+    print(
+        f"control run: batch={args.batch} status={args.status}"
+        + (f" published={args.published}" if args.published else "")
+        + (f" publish_id={args.publish_id}" if args.publish_id is not None else "")
+        + (f" quality_run_id={args.quality_run}" if args.quality_run is not None else "")
+    )
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # parser                                                                      #
 # --------------------------------------------------------------------------- #
 
@@ -283,6 +358,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_st = sub.add_parser("status", help="watermark frontier + recent gate runs")
     p_st.add_argument("--pipeline", default=DEFAULT_PIPELINE)
     p_st.add_argument("--limit", type=int, default=10)
+
+    sub.add_parser(
+        "check-sources",
+        help="file-system gate: ODS CSVs exist, non-empty, header matches the contract",
+    )
+    sub.add_parser(
+        "validate-ods",
+        help="ODS contract gate: newest batch LOADED, rows > 0, disk sha256 matches the log",
+    )
+    p_reg = sub.add_parser("batch-register", help="plan a window and register a control run")
+    p_reg.add_argument(
+        "--mode",
+        choices=("TAIL", "FORCE"),
+        default="TAIL",
+        help="TAIL: watermark-driven plan; FORCE: explicit backfill (default: TAIL)",
+    )
+    p_reg.add_argument(
+        "--window",
+        required=True,
+        help="comma-separated business dates, e.g. 2015-09-16,2015-09-17",
+    )
+    p_reg.add_argument("--dag-run", default="cli", help="Airflow dag_run id (default: cli)")
+    p_reg.add_argument("--pipeline", default=DEFAULT_PIPELINE)
+    p_fin = sub.add_parser("batch-finish", help="close a control run (SUCCESS / FAILED)")
+    p_fin.add_argument("--batch", type=int, required=True, help="control batch_id")
+    p_fin.add_argument("--status", choices=("SUCCESS", "FAILED"), required=True)
+    p_fin.add_argument("--published", choices=("PUBLISHED", "SKIPPED"))
+    p_fin.add_argument("--publish-id", type=int)
+    p_fin.add_argument("--quality-run", type=int)
+    p_fin.add_argument("--error", help="error summary written to the control row")
     return parser
 
 
@@ -301,6 +406,14 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_verify(args)
         if args.command == "status":
             return _cmd_status(args)
+        if args.command == "check-sources":
+            return _cmd_check_sources(args)
+        if args.command == "validate-ods":
+            return _cmd_validate_ods(args)
+        if args.command == "batch-register":
+            return _cmd_batch_register(args)
+        if args.command == "batch-finish":
+            return _cmd_batch_finish(args)
         return 1
     except (QualityGateError, IncrementalError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

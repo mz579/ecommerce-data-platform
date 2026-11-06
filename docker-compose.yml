@@ -1,22 +1,66 @@
 # ==================================================================
-# ecommerce-data-platform — Phase 0
+# ecommerce-data-platform — 数据仓库 + Airflow 编排（Phase 6）
 #
-# 只启动两个数据库实例：
-#   - mysql   ：业务数仓（后续 ODS/DWD/DWS/ADS 四层建模全在这里）
-#   - postgres：Airflow / Superset 元数据库（与业务数仓严格分离）
+# 服务：
+#   - mysql    ：业务数仓（ODS/DWD/DWS/ADS 全在 MySQL，含各层控制表）
+#   - postgres ：元数据库 meta（Airflow 元数据 + Superset 元数据，与业务库严格分离）
+#   - airflow-init     ：一次性初始化（建元库 schema + 幂等建管理员用户）
+#   - airflow-scheduler：LocalExecutor 调度器（任务在调度器进程内线程执行）
+#   - airflow-webserver：Web UI（树状视图 / 日志 / 触发 / 回填）
 #
-# 以后接入 Airflow / Superset / Kafka / Flink 属于后续 Phase，本阶段不配置。
+# Airflow 架构决策见 docs/airflow_design.md；Credentials 用环境变量而非
+# Airflow Connections（CLI 本来就只读环境变量，单机 LocalExecutor 任务进程
+# 直接继承容器环境，避免在 UI 里二次保管一份口令）。
 #
-# 镜像 tag 说明：禁止使用 :latest。下面锁定的补丁 tag 在首次 pull 前
-# 必须实际核实存在（参考 https://hub.docker.com/v2/repositories/library/mysql/tags/<tag> ）；
-# 若不存在，请换成同分支（8.0.x / 16.x）最近可用 tag，
-# 并同步更新 docs/architecture.md 的版本决策一节。
-#
-# 所有口令通过 .env 注入（.env 已被 git 忽略，禁止提交）。
-# 启动：docker compose up -d      停止：docker compose down
+# 镜像 tag 说明：禁止使用 :latest；Dockerfile 锁 apache/airflow:2.10.5-python3.11。
+# 中国大陆拉取先走镜像源再打回标准名（见 Dockerfile / airflow_design.md）。
 # ==================================================================
 
 name: ecommerce-data-platform
+
+x-airflow-common: &airflow-common
+  image: ecommerce-airflow:2.10.5-python3.11
+  build:
+    context: .
+    dockerfile: docker/airflow/Dockerfile
+  restart: unless-stopped
+  environment: &airflow-env
+    # --- Airflow 运行时（元数据库 = postgres 容器的 meta 库） ---
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY}
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    # airflow-init 用这三个变量幂等创建管理员用户（仅 init 需要，共享 anchor 最简）
+    AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_WWW_USER_USERNAME}
+    AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_WWW_USER_PASSWORD}
+    AIRFLOW_WWW_USER_EMAIL: ${AIRFLOW_WWW_USER_EMAIL}
+    TZ: UTC
+    # --- 业务数仓（容器内 host = mysql 服务名） ---
+    # 项目全部 CLI（DAG 调用的真实脚本）都从 MYSQL_* 环境变量取连接配置
+    MYSQL_HOST: mysql
+    MYSQL_PORT: "3306"
+    MYSQL_USER: ${MYSQL_USER}
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    MYSQL_DATABASE: ${MYSQL_DATABASE}
+  volumes: &airflow-volumes
+    - ./airflow/dags:/opt/airflow/dags:ro
+    - ./docker/airflow/init.sh:/opt/airflow/init.sh:ro
+    - ./src:/opt/ecommerce_dw/src:ro
+    - ./pyproject.toml:/opt/ecommerce_dw/pyproject.toml:ro
+    - ./README.md:/opt/ecommerce_dw/README.md:ro
+    - ./sql:/opt/ecommerce_dw/sql:ro
+    - ./data:/opt/ecommerce_dw/data:ro
+    - ./logs:/opt/ecommerce_dw/logs
+    - ./.env:/opt/ecommerce_dw/.env:ro
+    - airflow_logs:/opt/airflow/logs
+  networks:
+    - ecommerce-net
+  depends_on:
+    postgres:
+      condition: service_healthy
 
 services:
   mysql:
@@ -66,9 +110,42 @@ services:
     networks:
       - ecommerce-net
 
+  # 一次性初始化：airflow db migrate + 幂等建管理员。退出码 0 即完成。
+  airflow-init:
+    <<: *airflow-common
+    container_name: ecommerce-airflow-init
+    restart: "no"
+    command: ["bash", "/opt/airflow/init.sh"]
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: ecommerce-airflow-scheduler
+    command: ["scheduler"]
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $$(cat /etc/hostname)"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: ecommerce-airflow-webserver
+    command: ["webserver"]
+    ports:
+      - "${AIRFLOW_UI_PORT:-8080}:8080"
+    # 基础镜像不保证有 curl/wget，用 python urllib 探测 /health
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8080/health',timeout=5)\""]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
 volumes:
   mysql_data:
   postgres_data:
+  airflow_logs:
 
 networks:
   ecommerce-net:

@@ -1,0 +1,36 @@
+# Phase 6 — 构建上下文排除（docker/airflow/Dockerfile 的 build context = 仓库根）
+# 数据 / 日志 / 凭据 / 虚拟环境与 Airflow 引擎无关，且体积巨大（data/ ~3.6GB）。
+
+.git
+.gitignore
+.dockerignore
+.venv
+.env
+.env.*
+!.env.example
+
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+build
+dist
+
+data/
+logs/
+notebooks/
+dashboards/
+streaming/
+airflow/
+config/
+scripts/
+tests/
+docs/
+uv.lock
+
+docker/mysql/
+docker/postgres/
+docker/volumes/
+*.volume/
