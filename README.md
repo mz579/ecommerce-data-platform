@@ -2,7 +2,7 @@
 
 电商用户行为数据仓库与实时分析平台。
 
-**阶段进度：Phase 1（数据探索与契约）、Phase 2（ODS 贴源入库）、Phase 3（DWD 明细标准化）、Phase 4（DWS 汇总建模 + ADS 指标应用）、Phase 5（增量处理 + 质量门禁）已完成**（见「当前状态」）。尚未实现 Airflow 编排、Superset 看板或实时链路。
+**阶段进度：Phase 1（数据探索与契约）、Phase 2（ODS 贴源入库）、Phase 3（DWD 明细标准化）、Phase 4（DWS 汇总建模 + ADS 指标应用）、Phase 5（增量处理 + 质量门禁）、Phase 6（Airflow 编排）均已完成**（见「当前状态」）。尚未实现 Superset 看板或实时链路。
 
 目标形态（后续 Phase）：Retailrocket 用户行为数据 → MySQL 四层数仓（ODS / DWD / DWS / ADS）→ Airflow 编排 → Superset 看板；之后扩展 Kafka + Flink 实时链路。
 
@@ -48,6 +48,18 @@
   `ads_publish_log` 保持 2 行。统一入口 `python -m ecommerce_dw.cli`
   （incremental / quality / publish / verify / status）。设计与实测详见
   `docs/incremental_and_quality.md`。
+- **Phase 6 ✅ 已完成**：Airflow 编排——官方镜像 `apache/airflow:2.10.5-python3.11`
+  + LocalExecutor + 已有 PostgreSQL 的 `meta` 元库（**业务 MySQL 零污染**），
+  DAG `ecommerce_daily_pipeline` 严格十任务链
+  `start → check_source_files → register_batch → load_ods → validate_ods → build_dwd → build_dws → build_ads → quality_gate → publish_success`，
+  每任务调用项目真实 CLI/库（无哑占位）；`schedule="0 4 * * *"`、`catchup=False`、
+  `max_active_runs=1`，业务日期由逻辑日期/水位线驱动（`dags trigger --conf` 显式回填），
+  同逻辑日期可幂等复跑——**幂等是根本、retries 只兜底**；XCom 只传小元数据；
+  DAG 源码零凭据（compose 从 `.env` 注入环境变量）。**生产实测**：小窗口回填
+  （2015-09-16/17）十任务全 success 约 11 分钟（build_dwd 224s、build_dws 123s、
+  build_ads 复核 ALL MATCH、门禁 PASS 60/60 / 76.5M 行 235s）、重跑业务行数不变；
+  `phase6_retry_demo` 演示失败→自动重试→成功。设计/参数/回填手册/故障排查/
+  全部实测证据见 `docs/airflow_design.md`。
 - 可复用流式统计模块在 `src/ecommerce_dw/eda/`（无数据库、只读本地 CSV）。
 - 工程骨架 + 两个数据库的容器编排文件（`docker-compose.yml`）。
 - 容器运行时为 **WSL2 内的 Docker Engine**（Windows 侧无 `docker` 命令，见「已验证环境」）；MySQL / PostgreSQL 容器已实际启动并通过健康检查。
@@ -162,6 +174,33 @@ pytest
 - **DDL**：`scripts/apply_quality_ddl.py` 应用 `sql/ddl/etl_watermark.sql` +
   `quality_check_run.sql` + `quality_check_result.sql` + `ads_publish_log.sql`。
 
+### Phase 6 Airflow 编排
+
+- **设计文档**：`docs/airflow_design.md`（部署拓扑 / DAG 结构 / 参数表 / 凭据 /
+  回填手册 / 故障排查 / 生产实测）。
+- **DAG**：`airflow/dags/ecommerce_daily_pipeline.py`（主线）、
+  `airflow/dags/phase6_retry_demo.py`（重试演示，`schedule=None` 手动专用）。
+- **镜像与初始化**：`docker/airflow/Dockerfile`（锁 `2.10.5-python3.11`）、
+  `docker/airflow/init.sh`（`airflow db migrate` + 幂等建 admin）。
+- **控制表**：`sql/ddl/airflow_pipeline_run.sql`（每次 DAG 运行的规划与收尾审计，
+  `register_batch` 自动建、幂等）。
+- **日常命令**（全部经 WSL 执行，见下文「Docker（数据库）启停」前提）：
+
+```bash
+# 启动（init 先迁移元库+建用户，scheduler/webserver 随后起来）
+wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose up -d"
+
+# 看 DAG / 运行历史 / 任务状态
+docker compose exec airflow-scheduler airflow dags list
+docker compose exec airflow-scheduler airflow dags list-runs -d ecommerce_daily_pipeline
+docker compose exec airflow-scheduler airflow tasks states-for-dag-run \
+  ecommerce_daily_pipeline <run_id>
+
+# 显式回填（FORCE，业务日期，与机器日期无关）
+docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipeline \
+  --conf '{"from": "2015-09-16", "to": "2015-09-17"}'
+```
+
 ## Docker（数据库）启停
 
 > 前提：容器运行时已就绪。本机经实际验证的是 **WSL2 内的 Docker Engine 29.9.3**
@@ -234,6 +273,13 @@ python scripts/check_db_health.py
   （由 `docker/mysql/init/01_init.sql` 自动初始化，无需手工干预）。
 - **命名卷**：`ecommerce-data-platform_mysql_data`、
   `ecommerce-data-platform_postgres_data` 已由 compose 创建。
+- **Airflow（Phase 6）**：`ecommerce-airflow:2.10.5-python3.11` 镜像构建成功
+  （base `apache/airflow:2.10.5-python3.11` 经 `docker.1ms.run` 拉取后 tag 回标准名）；
+  `airflow-init` 退出码 0（元库 alembic 迁移 + admin 用户幂等创建）、
+  `airflow-scheduler` / `airflow-webserver` 均 `healthy`；`dags list` 可见
+  `ecommerce_daily_pipeline`（schedule `0 4 * * *`）；手动小窗口回填十任务全
+  success、同区间幂等复跑业务行数不变、`phase6_retry_demo` 失败后自动重试成功
+  （证据见 `docs/airflow_design.md` §9）。
 
 ## 目录结构
 
@@ -251,7 +297,7 @@ ecommerce-data-platform/
 │  ├─ quality/            # Phase 5：质量门禁（rules / runner / models）
 │  └─ cli.py、__main__.py # Phase 5：统一入口 `python -m ecommerce_dw.cli`
 ├─ sql/{ddl,dml,checks}/  # 数仓建模 SQL（含 Phase 5 控制表 etl_watermark / quality_check_run / quality_check_result / ads_publish_log）
-├─ airflow/dags/          # Airflow DAG（后续 Phase）
+├─ airflow/dags/          # Phase 6：Airflow DAG（ecommerce_daily_pipeline + retry demo）
 ├─ streaming/             # Kafka + Flink 实时链路（后续 Phase）
 ├─ dashboards/exports/    # 看板与导出（后续 Phase）
 ├─ tests/                 # 冒烟/单元/集成/数据质量测试
