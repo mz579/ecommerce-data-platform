@@ -98,12 +98,13 @@ def count_db_rows(cfg, table: str, source_file: str) -> int:
 
 
 def _cleanup_incomplete(cfg, source_file: str) -> bool:
-    """Mark stale PENDING/FAILED batches clean so a fresh load can start.
+    """Clean only FAILED batches so a fresh load can start.
 
-    A batch left PENDING/FAILED was interrupted by an unlucky crash between
-    chunks; its committed rows carry the ``ingest_batch_id`` of that dead batch
-    and would corrupt a fresh run's reconciliation, so wipe them first. LOADED
-    batches are left untouched (the loader skips those by SHA-256).
+    A FAILED batch recorded a real error (or a different SHA-256) and its
+    committed rows would corrupt a fresh run, so wipe them here. PENDING
+    batches are left untouched — the loader's cross-process resume continues
+    them in place (same batch_id), so we never throw away committed rows.
+    LOADED batches are also left alone (the loader skips them by SHA-256).
 
     Returns False when MySQL is unreachable (caller retries the pipeline).
     """
@@ -116,7 +117,7 @@ def _cleanup_incomplete(cfg, source_file: str) -> bool:
         entries = BatchLogRepo(conn).find_for_file(source_file)
     finally:
         conn.close()
-    stale = [e for e in entries if e.status in ("PENDING", "FAILED")]
+    stale = [e for e in entries if e.status == "FAILED"]
     for entry in stale:
         removed = loader.cleanup_batch(cfg, entry.batch_id)
         print(
@@ -180,6 +181,10 @@ def main() -> int:
                 else:
                     print(f"   skipped: already loaded as batch #{result.batch_id}")
                     ok = True
+                    # The skip proves the file was fully loaded earlier (its
+                    # first-load reconcile already passed), so the DB count to
+                    # report is the file's own row count.
+                    actual = expected
                 break
             except pymysql.err.OperationalError as exc:
                 if attempt >= FILE_PIPELINE_RETRIES:
@@ -222,9 +227,8 @@ def main() -> int:
 
     print("\n== reconciliation ==")
     for name, expected, actual, ok in summary:
-        print(
-            f"   {name:<28} source={expected:>11,}  db={actual:>11,}  {'OK' if ok else 'MISMATCH'}"
-        )
+        db_col = f"{actual:>11,}" if actual is not None else "        n/a"
+        print(f"   {name:<28} source={expected:>11,}  db={db_col}  {'OK' if ok else 'MISMATCH'}")
 
     if errors:
         print("\nRECONCILE FAILURES:")

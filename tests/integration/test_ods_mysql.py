@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pymysql
@@ -23,6 +24,7 @@ from ecommerce_dw.config import db_config_from_env
 from ecommerce_dw.ingestion import loader
 from ecommerce_dw.ingestion.batch_log import BatchLogRepo
 from ecommerce_dw.ingestion.db import connect
+from ecommerce_dw.ingestion.keys import make_row_key, sha256_file
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -213,7 +215,7 @@ def test_failed_batch_can_be_cleaned_and_rerun(cfg, tmp_path, tracked):
     assert _count_by_batch(cfg, _EVENTS_TABLE, failed[0].batch_id) == 2
 
     # Re-loading while the FAILED batch exists is guarded.
-    with pytest.raises(loader.BatchStateError, match="incomplete batches"):
+    with pytest.raises(loader.BatchStateError, match="failed/changed batches"):
         loader.load_csv(cfg, src, _EVENTS_TABLE, chunk_size=2)
 
     # Cleaning the batch removes its partial rows.
@@ -278,3 +280,68 @@ def test_load_item_properties_and_category_tree_roundtrip(cfg, tmp_path, tracked
         assert cur.fetchone()[0] == ""
     finally:
         conn.close()
+
+
+def test_pending_batch_is_resumed_in_place_after_interrupted_run(cfg, tmp_path, tracked):
+    """A crashed run's PENDING batch continues on the next run (no data loss).
+
+    Simulates a mid-load process kill: one chunk committed, then the process
+    died before the batch could be marked LOADED. Re-running the loader must
+    resume the same batch_id (counting the already-committed rows) and finish
+    the file, rather than registering a fresh batch or duplicating rows.
+    """
+    ip_name = _unique_name("ods_it_resume_")
+    src = _write_csv(
+        tmp_path / ip_name,
+        ["timestamp", "itemid", "property", "value"],
+        [
+            ["1435460400000", "1", "categoryid", "10"],
+            ["1435460400001", "2", "categoryid", "20"],
+            ["1435460400002", "3", "categoryid", "30"],
+        ],
+    )
+    tracked(ip_name, _IP_TABLE)
+
+    # Reproduce the DB state left behind by the killed run: a PENDING batch row
+    # plus a committed chunk (here: source_row_numbers 2 only).
+    conn = connect(cfg)
+    try:
+        repo = BatchLogRepo(conn)
+        started = datetime.now(UTC).replace(tzinfo=None)
+        batch_id = repo.register(ip_name, sha256_file(src), _IP_TABLE, started)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT IGNORE INTO ods_item_properties_raw "
+            "(row_key, `timestamp`, itemid, `property`, `value`, "
+            " source_file, source_row_number, ingest_batch_id, loaded_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                make_row_key(ip_name, 2),
+                "1435460400000",
+                "1",
+                "categoryid",
+                "10",
+                ip_name,
+                2,
+                batch_id,
+                started,
+            ),
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+    assert _count(cfg, _IP_TABLE, ip_name) == 1
+    assert _find(cfg, ip_name)[0].status == "PENDING"
+
+    # The next run continues the same batch from row 3.
+    result = loader.load_csv(cfg, src, _IP_TABLE)
+    assert not result.skipped
+    assert result.batch_id == batch_id  # same batch, not a fresh registration
+    assert result.rows_committed == 3
+    assert _count(cfg, _IP_TABLE, ip_name) == 3
+
+    loaded = [e for e in _find(cfg, ip_name) if e.status == "LOADED"]
+    assert len(loaded) == 1  # no duplicate log row
+    assert loaded[0].batch_id == batch_id
+    assert loaded[0].row_count == 3

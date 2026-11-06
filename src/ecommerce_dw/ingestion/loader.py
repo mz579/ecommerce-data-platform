@@ -139,6 +139,8 @@ def load_csv(
     try:
         repo = BatchLogRepo(conn)
         existing = repo.find_for_file(source_file)
+        resume_batch = None
+        resume_inserted = 0
         if existing and not force:
             loaded = [e for e in existing if e.status == "LOADED"]
             if loaded:
@@ -159,27 +161,51 @@ def load_csv(
                     status="SKIPPED",
                     skipped=True,
                 )
-            blocking = [e for e in existing if e.status in ("PENDING", "FAILED")]
-            if blocking:
-                ids = ", ".join(str(e.batch_id) for e in blocking)
+            # A PENDING batch with the same file SHA-256 is a previous run that
+            # lost its process/connection mid-insert. Continue it in place
+            # (counting its already-committed rows) so no committed work is
+            # thrown away; the file's rows stay inside one single batch.
+            pend = [e for e in existing if e.status == "PENDING" and e.file_sha256 == file_sha256]
+            if pend:
+                resume_batch = pend[-1]
+                resume_inserted = _count_batch_rows(conn, spec.table_name, resume_batch.batch_id)
+                logger.info(
+                    "resume batch #%d for %s (%d rows already committed by the interrupted run)",
+                    resume_batch.batch_id,
+                    source_file,
+                    resume_inserted,
+                )
+            needs_clean = [
+                e
+                for e in existing
+                if e.status == "FAILED" or (e.status == "PENDING" and e.file_sha256 != file_sha256)
+            ]
+            if needs_clean:
+                ids = ", ".join(str(e.batch_id) for e in needs_clean)
                 raise BatchStateError(
-                    f"file {source_file!r} has incomplete batches [{ids}]; "
-                    f"clean them first, e.g. "
-                    f"python -m ecommerce_dw.ingestion.cli cleanup --batch {blocking[0].batch_id}"
+                    f"file {source_file!r} has failed/changed batches [{ids}]; "
+                    "clean them first, e.g. "
+                    f"python -m ecommerce_dw.ingestion.cli "
+                    f"cleanup --batch {needs_clean[0].batch_id}"
                 )
         if existing and force:
             _delete_file_rows(conn, spec.table_name, source_file)
             for entry in existing:
                 repo.mark_cleaned(entry.batch_id, _now())
 
-        started = _now()
         cursor = conn.cursor()
         cursor.max_stmt_length = _MAX_STMT_LENGTH
         batch_id: int | None = None
         inserted = 0
         insert_sql = build_insert_sql(spec)
         try:
-            batch_id = repo.register(source_file, file_sha256, spec.table_name, started)
+            if resume_batch is not None:
+                batch_id = resume_batch.batch_id
+                inserted = resume_inserted
+                started = resume_batch.started_at
+            else:
+                started = _now()
+                batch_id = repo.register(source_file, file_sha256, spec.table_name, started)
             dur_start = time.monotonic()
             resumed = 0
             while True:
@@ -299,6 +325,19 @@ def _safe_rollback(conn: pymysql.connections.Connection) -> None:
         conn.rollback()
     except Exception:
         pass
+
+
+def _count_batch_rows(conn: pymysql.connections.Connection, table_name: str, batch_id: int) -> int:
+    """Return how many rows a batch already committed (for cross-process resume)."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            f"SELECT COUNT(*) FROM `{table_name}` WHERE ingest_batch_id = %s",
+            (batch_id,),
+        )
+        return int(cursor.fetchone()[0])
+    finally:
+        cursor.close()
 
 
 def _wait_and_reconnect(cfg: DbConfig, wait_seconds: int, resumed: int, max_resumes: int):
