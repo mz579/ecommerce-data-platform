@@ -51,6 +51,15 @@ SOURCES = (
     "item_properties_part2.csv",
 )
 
+# Bigger chunks cut InnoDB commit/fsync overhead per short MySQL uptime window
+# (the dev box reboots the VM every few minutes). 50k rows per chunk reduces
+# commits 5x vs the 10k default while keeping memory well under control.
+CHUNK_SIZE_BY_FILE = {
+    "events.csv": 50_000,
+    "item_properties_part1.csv": 50_000,
+    "item_properties_part2.csv": 50_000,
+}
+
 
 def _setup_logging() -> None:
     """Route the loader's progress lines to console and logs/ods_ingestion.log."""
@@ -141,8 +150,11 @@ def main() -> int:
     for name in SOURCES:
         path = DATA_DIR / name
         table = infer_table_for_file(name) or "?"
+        chunk_size = CHUNK_SIZE_BY_FILE.get(name, loader.DEFAULT_CHUNK_SIZE)
         expected = count_source_rows(path)
-        print(f"\n== loading {name} -> {table} (source data rows: {expected:,})")
+        print(
+            f"\n== loading {name} -> {table} (source data rows: {expected:,}, chunk={chunk_size:,})"
+        )
         result = None
         actual = None
         ok = False
@@ -154,6 +166,7 @@ def main() -> int:
                     cfg,
                     path,
                     table,
+                    chunk_size=chunk_size,
                     max_resumes=MAX_RESUMES,
                     resume_wait_seconds=RESUME_WAIT_SECONDS,
                 )
