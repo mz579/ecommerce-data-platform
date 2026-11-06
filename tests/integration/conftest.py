@@ -40,6 +40,15 @@ _ODS_DDL_FILES = (
     "ods_category_tree_raw.sql",
 )
 
+# Phase-5 control tables. NOTE: ads_publish_log.sql is intentionally absent here -
+# the ads_*.sql glob below already applies it, adding it twice would be a no-op
+# (CREATE IF NOT EXISTS) but is avoided to keep the intent explicit.
+_PHASE5_DDL_FILES = (
+    "etl_watermark.sql",
+    "quality_check_run.sql",
+    "quality_check_result.sql",
+)
+
 
 def resolve_test_cfg() -> DbConfig:
     """Build the app-side DbConfig for the dedicated test schema.
@@ -76,6 +85,7 @@ def _apply_schema(cfg: DbConfig) -> None:
     ddl_dir = PROJECT_ROOT / "sql" / "ddl"
     files = (
         [ddl_dir / name for name in _ODS_DDL_FILES]
+        + [ddl_dir / name for name in _PHASE5_DDL_FILES]
         + sorted(ddl_dir.glob("dwd_*.sql"))
         + sorted(ddl_dir.glob("dws_*.sql"))
         + sorted(ddl_dir.glob("ads_*.sql"))
