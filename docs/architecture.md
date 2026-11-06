@@ -34,11 +34,11 @@ Phase 0 只交付工程骨架：目录结构、Python 工程配置、两套数�
 - 不用 `:latest` 的理由：latest 是不可预期的游标，某次重建容器时可能悄悄跨入
   新大版本，行为漂移难以排查。
 
-**tag 核对要求**：当前锁定的 `mysql:8.0.43` 与 `postgres:16.13` 是编写本文件时的
-候选补丁版本。首次 pull 前必须通过镜像仓库接口核实存在（例如
-<https://hub.docker.com/v2/repositories/library/mysql/tags/8.0.43>），若不存在，
-换成同分支（8.0.x / 16.x）最近可用补丁 tag，并同步更新 `docker-compose.yml`
-与本小节。
+**tag 核对情况（已核实）**：锁定的 `mysql:8.0.43` 与 `postgres:16.13` 已在本机
+通过实际拉取确认存在（见 `README.md`「已验证环境」；亦可用
+<https://hub.docker.com/v2/repositories/library/mysql/tags/8.0.43> 复核）。
+这两个 tag 直接用于 `docker-compose.yml`；未来升级补丁版本时仍走同分支
+（8.0.x / 16.x）最近可用 tag，并同步更新 `docker-compose.yml` 与本小节。
 
 ## 5. 数据流示意
 
@@ -94,4 +94,7 @@ Airflow / Superset 的非业务状态（DAG 运行记录、看板定义等）存
   `docker-compose.yml`、`docker/mysql/init/01_init.sql`、`scripts/check_db_health.py`、
   `tests/test_smoke.py`、`config/{config.example,logging}.yaml`、`README.md`、本文档。
 - 已验证：ruff + pytest（最小测试不依赖数据库）。
-- **未验证**：容器启动与真实连接（本机未安装 Docker Desktop / WSL2）。
+- **已验证（实测）**：容器启动与真实连接 —— WSL2 内 Docker Engine 29.9.3；
+  `mysql:8.0.43` + `postgres:16.13` 拉取成功；两容器 healthy、RestartCount=0；
+  `scripts/check_db_health.py` 退出码 0；业务库 `ecommerce_dw` 为
+  utf8mb4 / utf8mb4_0900_ai_ci；命名卷已创建（详见 `README.md`「已验证环境」）。

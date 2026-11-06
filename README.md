@@ -14,7 +14,7 @@
   `docs/data_dictionary.md`、`docs/metric_definitions.md`、`docs/data_contract.md`。
 - 可复用流式统计模块在 `src/ecommerce_dw/eda/`（无数据库、只读本地 CSV）。
 - 工程骨架 + 两个数据库的容器编排文件（`docker-compose.yml`）。
-- 本机 Docker Desktop / WSL2 **尚未安装**，容器相关内容未实际启动验证（见「已知限制与下一步」）。
+- 容器运行时为 **WSL2 内的 Docker Engine**（Windows 侧无 `docker` 命令，见「已验证环境」）；MySQL / PostgreSQL 容器已实际启动并通过健康检查。
 - 业务数仓（MySQL）与 Airflow/Superset 元数据库（PostgreSQL）严格分离（见 `docs/architecture.md`）。
 
 ## 环境要求
@@ -22,7 +22,11 @@
 - Windows 11（本说明面向 PowerShell；Git Bash 亦可）
 - git >= 2.x
 - uv（本项目用 uv 管理 Python 3.11 虚拟环境，不使用系统 py 启动器）
-- （可选，容器相关）Docker Desktop（WSL2 backend）
+- 容器运行时（二选一；本机已验证的是第一种）：
+  - **WSL2 内的 Docker Engine**（主路径）：Ubuntu24.04 + systemd + overlayfs；
+    Windows 侧没有 `docker` 命令，所有 compose 命令在 WSL 里执行
+    （见「Docker（数据库）启停」）。
+  - Docker Desktop（WSL2 backend）：另一种可选路径，命令相同，可在 Windows 侧直接执行。
 
 ## 初始化步骤
 
@@ -77,28 +81,38 @@ pytest
 
 ## Docker（数据库）启停
 
-> 前提：已安装并启动 Docker Desktop（含 WSL2 后端）。当前环境未安装，见「已知限制与下一步」。
+> 前提：容器运行时已就绪。本机经实际验证的是 **WSL2 内的 Docker Engine 29.9.3**
+> （发行版 `Ubuntu24.04`，systemd 管理）；Windows 侧（PowerShell / Git Bash）**没有**
+> `docker` 命令，所有容器命令都在 WSL 里执行。若改用 Docker Desktop（WSL2 backend），
+> 下面命令可在 Windows 侧直接执行。
 
-```powershell
+所有 compose 操作统一经 WSL 执行（每次一条命令，目录为 Windows 挂载点）：
+
+```bash
 # 启动 MySQL + PostgreSQL（后台）
-docker compose up -d
+wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose up -d"
 
 # 查看状态
-docker compose ps
+wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose ps"
 
 # 查看日志（MySQL 首次建库脚本的输出也在这里）
-docker compose logs -f mysql
+wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose logs -f mysql"
 
 # 停止（保留数据卷）
-docker compose down
+wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose down"
 
 # 停止并删除数据卷（数据会丢，谨慎使用）
-docker compose down -v
+wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose down -v"
 ```
 
 - 端口、库名、用户名、口令全部在 `.env` 中配置，`docker compose` 自动读取。
 - MySQL 首次启动会自动执行 `docker/mysql/init/01_init.sql`（建库 + utf8mb4 字符集）。
-- **镜像 tag 首次 pull 前必须核实存在**，若不存在请换同分支最近可用 tag（详见 `docs/architecture.md`）。
+- 镜像拉取：Docker Hub 直连不通，daemon 已配置 registry-mirrors
+  （daocloud / 1ms.run / dockerproxy.net）。自动拉取曾因 CDN 节点超时失败一次，
+  改用 `docker pull docker.1ms.run/library/<image>` 再 `docker tag` 回标准名即成功
+  （详见「已验证环境」）。
+- **镜像 tag 已核实存在并拉取成功**：`mysql:8.0.43`、`postgres:16.13`
+  （详见 `docs/architecture.md` §4）。
 
 ## 数据库连接验证
 
@@ -118,6 +132,25 @@ python scripts/check_db_health.py
 | PostgreSQL（元数据库） | 127.0.0.1 | `POSTGRES_PORT` | `POSTGRES_DB` | `POSTGRES_USER` |
 
 `scripts/check_db_health.py` 会自动从 `.env` 读取以上变量。
+
+## 已验证环境（Docker / 数据库实测记录）
+
+> 以下均为本机**实际执行结果**，供运维与面试引用；环境变化时同步更新本节。
+
+- **运行时**：WSL2 内 Docker Engine **29.9.3**（发行版 Ubuntu24.04，systemd 管理，
+  overlayfs 存储驱动）；Windows 侧无 `docker` 命令，compose 一律在 WSL 中执行。
+- **拉取方式**：Docker Hub 直连不通；daemon 已配置 registry-mirrors
+  （daocloud / 1ms.run / dockerproxy.net）。`docker compose up -d` 自动拉取时曾因
+  CDN 节点超时失败一次；改用 `docker pull docker.1ms.run/library/<image>` 再
+  `docker tag` 回标准名后成功。
+- **镜像**：`mysql:8.0.43` 与 `postgres:16.13` 两个 tag 均已实际拉取成功、确认存在。
+- **容器健康**：两容器均为 `healthy`，`RestartCount=0`。
+- **连通性**：Windows 侧 `python scripts/check_db_health.py` 退出码 **0**
+  （两个库 SELECT 1 均通过，走宿主机发布端口 127.0.0.1）。
+- **字符集**：业务库 `ecommerce_dw` 为 **utf8mb4 / utf8mb4_0900_ai_ci**
+  （由 `docker/mysql/init/01_init.sql` 自动初始化，无需手工干预）。
+- **命名卷**：`ecommerce-data-platform_mysql_data`、
+  `ecommerce-data-platform_postgres_data` 已由 compose 创建。
 
 ## 目录结构
 
@@ -142,7 +175,8 @@ ecommerce-data-platform/
 
 ## 已知限制与下一步
 
-- Docker Desktop / WSL2 未安装（`docker` 命令不存在），Phase 0 **未**对容器做任何实际验证；安装 Docker 后若 compose 配置有问题，会在首次启动时修正。
+- 容器运行时已就绪且 Phase 0 容器相关交付物已实测通过（WSL2 内 Docker Engine，
+  见「已验证环境」）；若日后迁到 Docker Desktop 或 CI 环境，以「已验证环境」为基线重新核对。
 - `docs/architecture.md` 中包含完整 Roadmap；下一阶段从「Phase 2：ODS 入库与数据批次」开始。
 
 ## 安全说明
