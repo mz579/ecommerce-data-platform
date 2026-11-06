@@ -1,8 +1,9 @@
 """Apply the ODS DDL files to the ecommerce_dw MySQL database (Phase 2).
 
-The SQL files in ``sql/ddl/`` are all `CREATE TABLE IF NOT EXISTS`, so this
-script is idempotent and safe to re-run; it prints which file it applies and
-lists the resulting tables.
+The ODS DDL files (``ods_*.sql`` + the ``etl_batch_log`` audit table) are all
+`CREATE TABLE IF NOT EXISTS`, so this script is idempotent and safe to re-run;
+it prints which file it applies and lists the resulting tables. DWD DDL lives
+in its own ``dwd_*.sql`` files and is applied by ``scripts/apply_dwd_ddl.py``.
 
 Usage (project root, venv active):
 
@@ -22,6 +23,15 @@ from ecommerce_dw.config import db_config_from_env
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _MYSQL_DEFAULTS = {"PORT": "3306", "USER": "ecom_app", "DATABASE": "ecommerce_dw"}
 
+# Only files that belong to the ODS layer; DWD files (dwd_*.sql) are applied by
+# scripts/apply_dwd_ddl.py so this script stays a pure ODS target.
+_ODS_DDL_FILES = (
+    "ods_etl_batch_log.sql",
+    "ods_events_raw.sql",
+    "ods_item_properties_raw.sql",
+    "ods_category_tree_raw.sql",
+)
+
 EXPECTED_TABLES = (
     "etl_batch_log",
     "ods_events_raw",
@@ -34,9 +44,12 @@ def main() -> int:
     load_dotenv(PROJECT_ROOT / ".env")
     cfg = db_config_from_env("MYSQL", engine="mysql", defaults=_MYSQL_DEFAULTS)
     ddl_dir = PROJECT_ROOT / "sql" / "ddl"
-    scripts = sorted(ddl_dir.glob("*.sql"))
-    if not scripts:
-        print("no *.sql files found under sql/ddl/", file=sys.stderr)
+    scripts = [ddl_dir / name for name in _ODS_DDL_FILES]
+    if not scripts or any(not p.is_file() for p in scripts):
+        print(
+            f"ODS DDL files missing under sql/ddl/; expected {list(_ODS_DDL_FILES)}",
+            file=sys.stderr,
+        )
         return 2
 
     print("applying ODS DDL...")
