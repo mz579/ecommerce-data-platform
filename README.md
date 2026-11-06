@@ -2,7 +2,7 @@
 
 电商用户行为数据仓库与实时分析平台。
 
-**阶段进度：Phase 1（数据探索与契约）、Phase 2（ODS 贴源入库）、Phase 3（DWD 明细标准化）、Phase 4（DWS 汇总建模 + ADS 指标应用）已完成**（见「当前状态」）。尚未实现 Airflow 编排、Superset 看板或实时链路。
+**阶段进度：Phase 1（数据探索与契约）、Phase 2（ODS 贴源入库）、Phase 3（DWD 明细标准化）、Phase 4（DWS 汇总建模 + ADS 指标应用）、Phase 5（增量处理 + 质量门禁）已完成**（见「当前状态」）。尚未实现 Airflow 编排、Superset 看板或实时链路。
 
 目标形态（后续 Phase）：Retailrocket 用户行为数据 → MySQL 四层数仓（ODS / DWD / DWS / ADS）→ Airflow 编排 → Superset 看板；之后扩展 Kafka + Flink 实时链路。
 
@@ -35,6 +35,19 @@
   **全量构建已完成（build #1 LOADED，3,431,482 行 / 7 表，164.5s）**：
   PV 全区间 2,649,436、区间 UV 1,396,937、D1 留存 2.75%，`verify` 1,668 checks
   全窗口 ALL MATCH，设计见 `docs/dws_ads_design.md`，代码在 `src/ecommerce_dw/dws/`。
+- **Phase 5 ✅ 已完成**：增量处理 + 质量门禁。**增量**以
+  `etl_watermark` 水位线（业务日期 × 已消费 ODS 批次）为唯一驱动，同一入口处理
+  「新尾巴 + 7 天窗口内迟到」，历史修正走 `incremental --from/--to`；DWD→DWS→ADS
+  按受影响日期幂等重建，成功才推水位，稳定态往返 = no-op。**生产实测**：水位引导
+  137 个业务日期；普通增量 255.41s（DWD 11,654 行 + 聚合 32,014 行）；深度回填
+  238.83s 并经历一次真实崩溃恢复（RUNNING 被 sweep、重跑自愈）。**质量门禁 60 条
+  规则**（完整性 3 + 唯一性 12 + 合法性 9 + 范围 12 + 跨层对账 24）硬失败，任一 FAIL
+  拒绝发布 ADS，运行与逐规则结果落 `quality_check_run` / `quality_check_result`，
+  发布写 `ads_publish_log`。全量门禁实测：run #1 = PASS 59/59（216.74s）、
+  run #2 = PASS（200.22s），加规则后 run #3 = **PASS 60/60，89,305,119 rows，224.65s**，
+  `ads_publish_log` 保持 2 行。统一入口 `python -m ecommerce_dw.cli`
+  （incremental / quality / publish / verify / status）。设计与实测详见
+  `docs/incremental_and_quality.md`。
 - 可复用流式统计模块在 `src/ecommerce_dw/eda/`（无数据库、只读本地 CSV）。
 - 工程骨架 + 两个数据库的容器编排文件（`docker-compose.yml`）。
 - 容器运行时为 **WSL2 内的 Docker Engine**（Windows 侧无 `docker` 命令，见「已验证环境」）；MySQL / PostgreSQL 容器已实际启动并通过健康检查。
@@ -136,6 +149,19 @@ pytest
 - **聚合核心**：`src/ecommerce_dw/dws/`（`agg_sql.py` 纯 SQL 语句、`builder.py` 构建编排、
   `constants.py` 口径常量，`AGG_VERSION="1"`）。
 
+### Phase 5 增量处理 / 质量门禁
+
+- **设计文档**：`docs/incremental_and_quality.md`（水位线模型/规划器/增量语义/60 条门禁
+  规则目录/发布门控/生产实测）。
+- **统一入口**：`python -m ecommerce_dw.cli`（`incremental` / `quality` / `publish` /
+  `verify` / `status`，见该文档 §8 CLI 速查）。
+- **增量实现**：`src/ecommerce_dw/incremental/`（`watermark.py` 水位仓库、
+  `planner.py` 日期规划、`runner.py` 编排）。
+- **门禁实现**：`src/ecommerce_dw/quality/`（`rules.py` 规则目录、`runner.py` 运行器 /
+  发布门控、`models.py` 模型与 `date_filter`）。
+- **DDL**：`scripts/apply_quality_ddl.py` 应用 `sql/ddl/etl_watermark.sql` +
+  `quality_check_run.sql` + `quality_check_result.sql` + `ads_publish_log.sql`。
+
 ## Docker（数据库）启停
 
 > 前提：容器运行时已就绪。本机经实际验证的是 **WSL2 内的 Docker Engine 29.9.3**
@@ -216,12 +242,15 @@ ecommerce-data-platform/
 ├─ config/                # 配置文件模板（不含凭据）
 ├─ data/{raw,staging,sample}/   # 数据目录（数据文件不入库、不提交）
 ├─ scripts/               # 运维脚本（check_db_health、apply_*_ddl 等）
-├─ src/ecommerce_dw/      # 项目 Python 包（eda 探索 / config 配置）
+├─ src/ecommerce_dw/      # 项目 Python 包（eda / ingestion / dwd / dws / cli）
 │  ├─ eda/                # Phase 1：无库流式统计
 │  ├─ ingestion/          # Phase 2：ODS 分块幂等装载
-│  └─ dwd/                # Phase 3：DWD 构建（transform / builder / cli）
-├─ src/ecommerce_dw/dws/  # Phase 4：DWS/ADS 聚合（agg_sql / builder / cli / constants）
-├─ sql/{ddl,dml,checks}/  # 数仓建模 SQL（后续 Phase 使用）
+│  ├─ dwd/                # Phase 3：DWD 构建（transform / builder / cli）
+│  ├─ dws/                # Phase 4：DWS/ADS 聚合（agg_sql / builder / cli / constants）
+│  ├─ incremental/        # Phase 5：水位线增量处理（watermark / planner / runner）
+│  ├─ quality/            # Phase 5：质量门禁（rules / runner / models）
+│  └─ cli.py、__main__.py # Phase 5：统一入口 `python -m ecommerce_dw.cli`
+├─ sql/{ddl,dml,checks}/  # 数仓建模 SQL（含 Phase 5 控制表 etl_watermark / quality_check_run / quality_check_result / ads_publish_log）
 ├─ airflow/dags/          # Airflow DAG（后续 Phase）
 ├─ streaming/             # Kafka + Flink 实时链路（后续 Phase）
 ├─ dashboards/exports/    # 看板与导出（后续 Phase）
@@ -240,9 +269,10 @@ ecommerce-data-platform/
   见「已验证环境」）；若日后迁到 Docker Desktop 或 CI 环境，以「已验证环境」为基线重新核对。
 - Phase 3 DWD 全量构建在 WSL 里的 MySQL 上实测通过（行数恒等式成立，见
   `docs/dwd_design.md` §9）；Phase 4 DWS/ADS 全量构建同样实测通过（build #1，
-  `verify` ALL MATCH，见 `docs/dws_ads_design.md` §8）；下次启动前先
+  `verify` ALL MATCH，见 `docs/dws_ads_design.md` §8）；Phase 5 增量与 60 条质量门禁
+  实测通过（见 `docs/incremental_and_quality.md` §9，含崩溃恢复实证）；下次启动前先
   `docker compose up -d` 并等待 MySQL 健康。
-- `docs/architecture.md` 中包含完整 Roadmap；下一阶段为「Phase 5：Airflow 编排」，
+- `docs/architecture.md` 中包含完整 Roadmap；下一阶段为「Phase 6：Airflow 编排」，
   读取目标为 ADS 层输出 + DWD 明细。
 
 ## 安全说明

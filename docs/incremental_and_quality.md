@@ -7,7 +7,7 @@
 >
 > 核心一句话：**以「业务日期 × 已消费 ODS 批次」的水位线（watermark）为唯一驱动，
 > 同一套增量入口处理「新尾巴 + 窗口内迟到」两类业务日期，历史修正通过显式
-> `--from/--to` 回填进入同一入口；每次处理完毕先跑 59 条硬门禁规则，任何一条 FAIL
+> `--from/--to` 回填进入同一入口；每次处理完毕先跑 60 条硬门禁规则，任何一条 FAIL
 > 即拒绝发布 ADS，状态与逐规则结果全部落库可查。**
 >
 > 本文所有数字均为**生产库 `ecommerce_dw` 实测值**（真实执行记录，无推算）。
@@ -19,7 +19,7 @@
 | 增量主键 | **业务日期**（UTC 日，`event_date_utc`），不是机器时间 / 批处理时钟 |
 | 驱动 | `etl_watermark` 水位线：每（pipeline, 业务日期）记「已消费的 ODS 最大 `ingest_batch_id`」 |
 | 迟到策略 | N=7 天回看窗内自动重算受影响日期；窗外深度修正需显式 `--from/--to`，走同一入口 |
-| 门禁 | 59 条规则 = 完整性 3 + 唯一性 12 + 合法性 9 + 范围 12 + 跨层对账 23，**硬失败**（任一 FAIL → 拒绝发布 ADS） |
+| 门禁 | 60 条规则 = 完整性 3 + 唯一性 12 + 合法性 9 + 范围 12 + 跨层对账 24，**硬失败**（任一 FAIL → 拒绝发布 ADS） |
 | 发布 | `ads_publish_log` 只接受「本次新鲜全量门禁 PASS」或「引用一个既有 PASS run_id」的请求 |
 | 幂等 | 同 scope（同一业务日期集合）重复执行内容恒定；中途失败后重跑自动沿用上次部分成果并补齐 |
 | 依赖 | 纯 Python 3.11 + pymysql，无 Airflow / Kafka / Flink / Superset，无新增第三方库 |
@@ -169,7 +169,7 @@ DATES 重建能力本身保留（`dws.cli build --dates`），但在 Phase 5 的
 `build_id / loaded_at` 除外）。集成测试端到端断言：稳定态增量 = no-op；注入迟到
 批次后 D1 重建、再跑一次 = no-op；门禁全程 PASS。
 
-## 5. 质量门禁规则库（59 条）
+## 5. 质量门禁规则库（60 条）
 
 入口：`python -m ecommerce_dw.cli quality rules`；实现：
 `src/ecommerce_dw/quality/rules.py`（`build_rule_catalog`）。规则是纯 SQL 计数
@@ -182,7 +182,7 @@ DATES 重建能力本身保留（`dws.cli build --dates`），但在 Phase 5 的
 | **唯一性** | 12 | ODS：`ods_row_key_unique` / `ods_source_path_unique`；DWD：`dwd_events_row_key_unique` / `dwd_dedup_key_unique`(业务键) / `dwd_aux_row_key_unique`(duplicate/reject 表)；DWS/ADS：8 张汇总与应用表各自主键唯一（`dws_{user,item,category}_daily_pk_unique`、`ads_{traffic_daily,item_ranking_daily,retention_cohort}_pk_unique` + `ads_funnel_daily_pk_unique`） |
 | **合法性** | 9 | 事件类型枚举（DWD `{view, add_to_cart, transaction}` / ODS `{view, addtocart, transaction}`）、`dwd_event_date_in_window`（∈ 业务窗口 [2015-05-03, 2015-09-18]，按测试窗口参数化）、`dwd_visitor_null_flag_consistent`（`visitor_id IS NULL` ⟺ `quality_flags` 携带 `visitor_zero` 哨兵，其余非空）、`dwd_quality_flags_valid`（仅 `{ok, visitor_zero}`）、时间戳 / visitorid / itemid / transactionid 合法（ODS 五条） |
 | **范围** | 12 | ID>0（`dwd_item_id_positive`）、访客桶非负且 `visitor_zero` 与 `visitor_id=0` 严格一致、DWS 计数非负 + `active_flag` 二元、流量 pv/uv/dau 非负 + `is_full_day` 二元、漏斗指标非负、归一化率 ≤ 1（`conv_global_rate` 可 >1 除外）、留存率 ∈ [0,1]（分母 0 → NULL）、逐日 UV≤DAU、UV≤PV、DAU≤用户行数、排行 rank 连续 | 
-| **跨层对账** | 23 | DWS 逐维求和 == DWD 明细计数（user/item/category × view/cart/txn，9 条）；ADS == DWS/DWD 逐日逐指标（流量 3、漏斗 8、留存 2、排行 1：`ads_traffic_*_eq_*`、`ads_funnel_*_eq_*`、`ads_retention_age0_consistent` / `ads_retention_age1_le_cohort`、`ads_item_ranking_matches_dws_item`） |
+| **跨层对账** | 24 | DWS 逐维求和 == DWD 明细计数（user/item/category × view/cart/txn，9 条）；ADS == DWS/DWD 逐日逐指标（流量 3、漏斗 9、留存 2、排行 1：`ads_traffic_*_eq_*`、`ads_funnel_*_eq_*`、`ads_retention_age0_consistent` / `ads_retention_age1_le_cohort`、`ads_item_ranking_matches_dws_item`）；其中漏斗 9 条里 8 条对着 DWS 构建结果复核，新增的 `ads_funnel_conv_global_users_eq_dwd` 直接对 **DWD 明细**独立复算 `conv_global_users`（逐日 `event_type='transaction' AND visitor_id IS NOT NULL` 的 DISTINCT visitor_id 数，与构建口径 `SUM(transaction_cnt>0 AND visitor_zero=0)` 同集合、但完全不依赖 DWS 构建产物） |
 
 **阈值/容差**：除比率对账 `tolerance < 1e-6`（比率列 DECIMAL 存值 vs 精确商的
 浮点收敛）外，一律精确相等（整数计数）或方向不等式（≤ / ∈）。无「warn 且继续」：
@@ -208,8 +208,8 @@ ads_publish_log     -- 发布记录：scope、引用的 run_id、quality_status�
 
 ### 6.1 `quality run [--dates ...]`
 
-执行全部 59 条规则 → 落库 `quality_check_run`（1 行）+ `quality_check_result`
-（59 行）→ 返 `QualityReport`。**硬门禁**：任何规则 `bad > 0` → status=FAIL 并抛
+执行全部 60 条规则 → 落库 `quality_check_run`（1 行）+ `quality_check_result`
+（60 行）→ 返 `QualityReport`。**硬门禁**：任何规则 `bad > 0` → status=FAIL 并抛
 `QualityGateError`（信息含 run_id、失败规则数与每条违反行数），CLI 退出码 2。
 
 `--dates` 限定范围时做**范围门禁**（带日期窗口参数）——重建/修正了哪几天就验哪几天，
@@ -225,7 +225,9 @@ FAIL**，从设计上防止「规则失效、实际是坏的」假绿（Fool-me-
 
 发布只做一件事：写 `ads_publish_log` 一行。准入：
 
-- 不传 `--run` → 现场先跑一次**全量门禁**，PASS 才写；
+- 不传 `--run` → 现场先跑一次**全量门禁**，PASS 才写；该路径开头打印一行提示
+  （`publish: no --run given - running a fresh FULL quality gate ... expect a few minutes`），
+  说明发布前正在做全量扫描、预计数分钟，避免无感等待。
 - 传 `--run` → 校验该 run 存在且 status=PASS（最近一次全量跑通过即可复用，不必重跑）。
 
 以下情况一律拒绝（`QualityGateError`，`ads_publish_log` 零写入）：
@@ -292,34 +294,46 @@ python -m ecommerce_dw.cli status                               # 水位 + 近�
 | --- | --- |
 | 紧随其后的第二次 `incremental` | `built=(none) dwd_rows=0 agg_rows=0 watermark_upserted=0 duration=0.00s`（no-op） |
 
-### 9.4 全量质量门禁（run #1，FULL）
+### 9.4 全量质量门禁（最新 run #3，FULL，60 条规则）
 
 | 项 | 值 |
 | --- | --- |
-| 规则总数 / 通过 | **59 / 59（100%）**，失败 0，status=PASS |
-| 按类别 | 完整性 3/3、唯一性 12/12、合法性 9/9、范围 12/12、跨层对账 23/23 |
-| 检行数（checked 合计） | **89,304,980**（59 条规则「被比对行数」求和；如 `ods_row_key_unique` checked=23,033,672 = 三张 ODS 表行数总和） |
-| 运行耗时 | **216.74s**（3 分 37 秒墙钟；`quality_check_run` 记录 started→finished） |
-| 结果落库 | `quality_check_run` 1 行 + `quality_check_result` 59 行（逐规则 status=PASS） |
-| 发布 | `publish --run 1` → `quality_run=1` PASS → `ads_publish_log` 写入 publish_id=1 |
-| 复跑确认 | 恢复事件（§9.6）后复跑全量门禁 **run #2 = PASS 59/59（89,304,980 rows，200.22s）**，确认重建后数据与 run #1 一致；`ads_publish_log` 追加 publish_id=2 |
+| 规则总数 / 通过 | **60 / 60（100%）**，失败 0，status=PASS |
+| 按类别 | 完整性 3/3、唯一性 12/12、合法性 9/9、范围 12/12、跨层对账 24/24 |
+| 检行数（checked 合计） | **89,305,119**（60 条规则「被比对行数」求和；如 `ods_row_key_unique` checked=23,033,672 = 三张 ODS 表行数总和） |
+| 运行耗时 | **224.65s**（3 分 45 秒墙钟；`quality_check_run` 记录 started→finished） |
+| 结果落库 | `quality_check_run` 1 行 + `quality_check_result` 60 行（逐规则 status=PASS） |
+| 新增规则 | `ads_funnel_conv_global_users_eq_dwd`（逐日 `conv_global_users` 独立对 DWD 复算，checked=139 = 每个业务日期一行），与其余 23 条对账规则全数通过 |
+| 本轮是否触发发布 | 否（仅验证加规则后门禁仍 PASS）；`ads_publish_log` 保持 2 行不变 |
 
-**耗时热点（top-8，来自 `quality_check_result.duration_ms`）**：
+**历史门禁记录**（同生产库，加规则前的 59 条规则版本）：
+
+| run_id | status | 规则 | 检行数 | 耗时 | 事件 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | PASS | 59/59 | 89,304,980 | 216.74s | 首次全量门禁；`publish --run 1` → `ads_publish_log` publish_id=1 |
+| 2 | PASS | 59/59 | 89,304,980 | 200.22s | §9.6 崩溃恢复重建后复跑，确认数据与 run #1 一致；`publish` 追加 publish_id=2 |
+
+> 各规则耗时在多次运行间有小幅波动（MySQL 缓冲热身后重扫描更快，如
+> `ods_source_path_unique` run #1 = 125.9s、run #3 = 95.5s）；数字以各 run 的
+> `quality_check_result.duration_ms` 为准。
+
+**耗时热点（top-8，run #3，来自 `quality_check_result.duration_ms`）**：
 
 | 规则 | 耗时 | 说明 |
 | --- | --- | --- |
-| `ods_source_path_unique` | 125,921 ms | `COUNT(DISTINCT source_file, source_row_number)` 扫 23,033,672 行（双列 DISTINCT 最重） |
-| `ods_batch_log_rowcount` | 27,875 ms | 三张 ODS 表按 (文件,批次) 分组计数 |
-| `ods_batch_coverage` | 14,281 ms | 同上分组的 LEFT JOIN 覆盖检查 |
-| `ods_row_key_unique` | 9,344 ms | `COUNT(DISTINCT row_key)`（BINARY(32) 单列） |
-| `ads_funnel_orders_eq_dwd_distinct` | 9,297 ms | `COUNT(DISTINCT transaction_id)` 扫 139 日 |
-| `ods_event_type_valid` | 4,577 ms | 全表扫描 2,756,101 行 |
-| `dwd_dedup_key_unique` | 3,655 ms | 扫 2,755,641 行 |
-| `dwd_identity` | 2,452 ms | ODS vs DWD+dup+reject 三表聚合 |
+| `ods_source_path_unique` | 95,454 ms | `COUNT(DISTINCT source_file, source_row_number)` 扫 23,033,672 行（双列 DISTINCT 最重） |
+| `ods_batch_log_rowcount` | 50,718 ms | 三张 ODS 表按 (文件,批次) 分组计数 |
+| `ods_batch_coverage` | 24,797 ms | 同上分组的 LEFT JOIN 覆盖检查 |
+| `ads_funnel_conv_global_users_eq_dwd` | 9,000 ms | `COUNT(DISTINCT visitor_id)` 扫 dwd_events 139 日（新增规则，天然在对账热点区） |
+| `ads_funnel_orders_eq_dwd_distinct` | 9,000 ms | `COUNT(DISTINCT transaction_id)` 扫 139 日 |
+| `ods_row_key_unique` | 6,875 ms | `COUNT(DISTINCT row_key)`（BINARY(32) 单列） |
+| `ods_event_type_valid` | 3,562 ms | 全表扫描 2,756,101 行 |
+| `dwd_dedup_key_unique` | 3,468 ms | 扫 2,755,641 行 |
 
-> 观察：约 9 成耗时在 ODS 层（三张表的分组 / DISTINCT，合计 ≈ 177s）。若想更快，
-> 可行方向（留给决策，§11）：为 ODS 表建 `ingest_batch_id` 次级索引后按「新批次」
-> 范围限扫，或把全表唯一性改为对新批次抽查。
+> 观察：耗时集中在 ODS 层的分组 / DISTINCT（`ods_source_path_unique` + `ods_batch_log_rowcount`
+> + `ods_batch_coverage` + `ods_row_key_unique` 四条合计 ≈ 178s，占全量 224.65s 的 ~79%）；
+> 跨层对账里两条 DWD/ADS 大 join（`ads_funnel_*_eq_dwd`）各 ≈ 9s，是门禁中「单条最贵」的
+> 非 ODS 规则。**暂不新增投机性索引**，判断依据见 §11.1。
 
 SQL 复核（与上面数字同源，可在任意时刻重放）：
 
@@ -397,16 +411,31 @@ CLEANED，链上 build #5 重新完成 2 天 scope → 全表行数恢复。**�
 
 ## 11. 待决策事项（给评审/后续迭代）
 
-1. **门禁耗时**：全量 59 条规则一次约 3.6 分钟，其中 ODS 三层唯一性/分组 ≈ 145s。
-   是否接受「发布前必须全量门禁」的成本（当前行为），还是按批次/按日期做第一级
-   快速门禁、发布级仍全量？（§9.4 观察）
-2. **`conv_global_users` 无专用对账规则**：9 个漏斗指标里 8 个有跨层对账规则，
-   `conv_global_users` 依赖构建期不变量「== `buyer_users`」且没有逐日重算核对。
-   需要的话补一条 `ads_funnel_conv_global_users_eq_dws`（当前 23 条对账规则不加）。
-3. **README 阶段叙事**：README 把「Phase 5」写作 Airflow 编排，而本阶段按任务要求
-   实现的是**增量 + 门禁**（无 Airflow）。本文件未改写 README；是否需要同步更新
-   README 的阶段进度与项目树（新增 `incremental/`、`quality/`、统一 CLI）？
+1. **门禁耗时与索引（已解决）**：全量 60 条规则实测 224.65s（run #3；历史 run #1 =
+   216.74s、run #2 = 200.22s，波动来自 MySQL 缓冲热身）。构成：ODS 层四重分组/DISTINCT
+   （`ods_source_path_unique` 95.5s + `ods_batch_log_rowcount` 50.7s +
+   `ods_batch_coverage` 24.8s + `ods_row_key_unique` 6.9s）合计 ≈ 178s（≈ 79%），
+   另有 `ods_event_type_valid` 全表扫描 3.6s；两条 DWD/ADS 对账大 join（
+   `ads_funnel_orders_eq_dwd_distinct` / `ads_funnel_conv_global_users_eq_dwd`）各 ≈ 9s，
+   其余分布在后尾。
+   **结论：不新增投机性索引**。日常迭代用 `quality run --dates <d1>,<d2>`（范围门禁，
+   走 `date_filter` 收敛到受影响的几天，毫秒级）即可；发布前的全量门禁保留为一次性
+   总闸。**何时才值得加索引**：某条规则稳定成为瓶颈且耗时 ≥ 全量 30%（≈ ≥ 67s）时，
+   为它加索引——候选如 `etl_batch_log(ingest_batch_id)`、`ods_*_raw(source_file)`
+   或把全表唯一性改为按新批次限扫（§9.4 观察）。
+2. **`conv_global_users` 跨层对账（已解决）**：9 个漏斗指标现已全部有逐日对账规则。
+   新增 **`ads_funnel_conv_global_users_eq_dwd`**——直接对 DWD 明细独立复算：该日
+   `event_type='transaction' AND visitor_id IS NOT NULL` 的 DISTINCT visitor_id 数，
+   必须等于 `ads_funnel_daily` 该日 `conv_global_users`（与构建口径
+   `SUM(transaction_cnt>0 AND visitor_zero=0)` 同集合，但不依赖 DWS 构建产物）。
+   run #3 中该规则实际执行 **PASS**（checked=139 日），与既有 8 条漏斗规则
+   （`buyer_users`/`cart_users`/`view_users`/`conv_strict_users`/`orders`×DWD + 3 条 rate）
+   一起并入 24 条对账规则。**`buyer_users` 不缺对账**：它已有逐日
+   `ads_funnel_buyer_users_eq_dws`（且与 `conv_global_users` 构建期同集合），无需新增。
+3. **README 阶段叙事（已解决）**：README 已同步 Phase 5 进度（当前状态新条目 +
+   项目树 `incremental/`、`quality/`、统一 CLI + 产物快速入口 + 下一阶段编号），
+   阶段编号统一为主方案（Phase 5 = 增量处理与质量门禁，Phase 6 = Airflow 编排）。
 4. **`late_window_days=7` 的默认值**：产品上线后按「数据最晚可靠送达 SLA」微调；
    超出窗口的深修正目前要求人工 `--from/--to`，是否需要「窗口外自动告警/工单」?
-5. **测试基础**：生产 `dwd_events` 等大表未建额外索引；若把门禁作为高频调度项，
-   建议对 `etl_batch_log(ingest_batch_id)`、`ods_*_raw(source_file)` 补索引。
+5. **测试基础（已并入 1）**：生产大表暂不加索引；`etl_batch_log(ingest_batch_id)`、
+   `ods_*_raw(source_file)` 列为「某规则耗时 ≥ 全量 30%」时的首选候选。
