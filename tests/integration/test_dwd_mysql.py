@@ -1,7 +1,8 @@
 """Integration tests for the DWD build against a real MySQL (Phase 3).
 
-The tests stage a small synthetic events CSV into ``ods_events_raw`` via the
-Phase-2 loader, run ``build_dwd`` for test-only UTC dates (2099), and verify:
+The tests stage a small synthetic events CSV into the dedicated ``*_test``
+schema (never the production database), run ``build_dwd`` for test-only UTC
+dates (2099), and verify:
 
 - the identity ``ODS = dwd_events + dwd_events_duplicate + dwd_events_reject``;
 - the event mapping (``addtocart`` -> ``add_to_cart`` with raw preserved);
@@ -9,9 +10,11 @@ Phase-2 loader, run ``build_dwd`` for test-only UTC dates (2099), and verify:
 - reject rows are locatable per ``source_row_number`` with their reason;
 - re-running the same build is idempotent.
 
-Everything the tests create is removed afterwards (ODS rows + ODS batch log +
-DWD rows + DWD build log), so a passing run leaves the business tables clean.
-Tests are skipped when MySQL is unreachable or the DWD DDL is not applied.
+The dedicated schema is provisioned by the session-level ``mysql_testdb``
+fixture in ``tests/integration/conftest.py``: a schema name that does not end
+in ``_test`` makes the fixture raise, MySQL being unreachable/unprovisionable
+skips the module with an explicit reason, and a passing run drops the schema
+again afterwards.
 """
 
 from __future__ import annotations
@@ -21,19 +24,14 @@ import uuid
 from datetime import date
 from pathlib import Path
 
-import pymysql
 import pytest
-from dotenv import load_dotenv
 
-from ecommerce_dw.config import db_config_from_env
 from ecommerce_dw.dwd import builder
 from ecommerce_dw.dwd.build_log import BuildLogRepo
 from ecommerce_dw.dwd.builder import BuildResult
 from ecommerce_dw.dwd.transform import date_ms_range
 from ecommerce_dw.ingestion import loader
 from ecommerce_dw.ingestion.batch_log import BatchLogRepo
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 _EVENTS_TABLE = "ods_events_raw"
 _DWD_TABLES = (
@@ -47,15 +45,6 @@ TEST_DAY = date(2099, 1, 1)
 _DAY_START, _DAY_END = date_ms_range(TEST_DAY)
 
 _EVENTS_HEADER = ["timestamp", "visitorid", "event", "itemid", "transactionid"]
-
-
-def _build_cfg():
-    load_dotenv(PROJECT_ROOT / ".env")
-    return db_config_from_env(
-        "MYSQL",
-        engine="mysql",
-        defaults={"PORT": "3306", "USER": "ecom_app", "DATABASE": "ecommerce_dw"},
-    )
 
 
 def _write_events_csv(path: Path, rows) -> Path:
@@ -93,38 +82,14 @@ def _sample_rows() -> list[list[str]]:
 
 
 @pytest.fixture(scope="module")
-def cfg():
-    config = _build_cfg()
-    probe = None
-    try:
-        probe = pymysql.connect(
-            host=config.host,
-            port=config.port,
-            user=config.user,
-            password=config.password,
-            database=config.database,
-            charset="utf8mb4",
-            connect_timeout=3,
+def cfg(mysql_testdb):
+    """Use the session-provisioned dedicated test schema (never production)."""
+    if not mysql_testdb.database.endswith("_test"):
+        raise RuntimeError(
+            f"integration tests refuse to run against a non-test schema: "
+            f"{mysql_testdb.database!r} does not end with '_test'"
         )
-        with probe.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s "
-                "AND table_name IN ('dwd_events','dwd_events_duplicate',"
-                "'dwd_events_reject','dwd_events_stage','dwd_build_log')",
-                (config.database,),
-            )
-            dwd_tables = int(cur.fetchone()[0])
-    except Exception as exc:  # pragma: no cover - environment-dependent
-        pytest.skip(
-            f"MySQL unavailable ({type(exc).__name__}: {exc}); skipping DWD integration tests"
-        )
-        return None
-    finally:
-        if probe is not None:
-            probe.close()
-    if dwd_tables < 5:
-        pytest.skip("DWD DDL not applied; run `python scripts/apply_dwd_ddl.py` first")
-    return config
+    return mysql_testdb
 
 
 @pytest.fixture

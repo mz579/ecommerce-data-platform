@@ -1,12 +1,14 @@
 """Integration tests for ODS ingestion against a real MySQL (Phase 2).
 
 These tests run the full load pipeline — batch registration, chunked inserts,
-skip-on-reload, force reload, failure -> cleanup -> resume — against the real
-``ecommerce_dw`` database and then remove every row and log entry they created.
+skip-on-reload, force reload, failure -> cleanup -> resume — against a dedicated
+``*_test`` schema (never the production database).
 
-They are skipped (not failed) when MySQL is unreachable or the ODS DDL has not
-been applied, so a plain ``pytest`` also stays green on a machine without the
-database (see ``docs/ods_design.md``).
+The dedicated schema is provisioned by the session-level ``mysql_testdb``
+fixture in ``tests/integration/conftest.py``: if the resolved schema name does
+not end in ``_test`` the fixture raises, and if MySQL is unreachable (or the
+schema cannot be provisioned) the tests are skipped with an explicit reason, so
+a plain ``pytest`` stays green on a machine without the database.
 """
 
 from __future__ import annotations
@@ -16,31 +18,17 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pymysql
 import pytest
-from dotenv import load_dotenv
 
-from ecommerce_dw.config import db_config_from_env
 from ecommerce_dw.ingestion import loader
 from ecommerce_dw.ingestion.batch_log import BatchLogRepo
 from ecommerce_dw.ingestion.db import connect
 from ecommerce_dw.ingestion.keys import make_row_key, sha256_file
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
 # Tests only ever touch rows whose source_file matches these names.
 _EVENTS_TABLE = "ods_events_raw"
 _IP_TABLE = "ods_item_properties_raw"
 _CT_TABLE = "ods_category_tree_raw"
-
-
-def _build_cfg():
-    load_dotenv(PROJECT_ROOT / ".env")
-    return db_config_from_env(
-        "MYSQL",
-        engine="mysql",
-        defaults={"PORT": "3306", "USER": "ecom_app", "DATABASE": "ecommerce_dw"},
-    )
 
 
 def _write_csv(path: Path, header, rows) -> Path:
@@ -56,38 +44,14 @@ def _unique_name(prefix: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def cfg():
-    config = _build_cfg()
-    probe = None
-    try:
-        probe = pymysql.connect(
-            host=config.host,
-            port=config.port,
-            user=config.user,
-            password=config.password,
-            database=config.database,
-            charset="utf8mb4",
-            connect_timeout=3,
+def cfg(mysql_testdb):
+    """Use the session-provisioned dedicated test schema (never production)."""
+    if not mysql_testdb.database.endswith("_test"):
+        raise RuntimeError(
+            f"integration tests refuse to run against a non-test schema: "
+            f"{mysql_testdb.database!r} does not end with '_test'"
         )
-        with probe.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM information_schema.tables "
-                "WHERE table_schema = %s AND table_name IN "
-                "('etl_batch_log','ods_events_raw','ods_item_properties_raw','ods_category_tree_raw')",
-                (config.database,),
-            )
-            tables = int(cur.fetchone()[0])
-    except Exception as exc:  # pragma: no cover - environment-dependent
-        pytest.skip(
-            f"MySQL unavailable ({type(exc).__name__}: {exc}); skipping ODS integration tests"
-        )
-        return None
-    finally:
-        if probe is not None:
-            probe.close()
-    if tables < 4:
-        pytest.skip("ODS DDL not applied; run `python scripts/apply_ods_ddl.py` first")
-    return config
+    return mysql_testdb
 
 
 @pytest.fixture
