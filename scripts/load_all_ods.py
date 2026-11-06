@@ -17,6 +17,7 @@ Usage (project root, venv active):
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from pathlib import Path
@@ -45,6 +46,24 @@ SOURCES = (
     "item_properties_part1.csv",
     "item_properties_part2.csv",
 )
+
+
+def _setup_logging() -> None:
+    """Route the loader's progress lines to console and logs/ods_ingestion.log."""
+    handlers = [logging.StreamHandler(stream=sys.stdout)]
+    log_dir = PROJECT_ROOT / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handlers.append(
+            logging.FileHandler(log_dir / "ods_ingestion.log", encoding="utf-8", delay=True)
+        )
+    except OSError:
+        pass
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+    )
 
 
 def count_source_rows(path: Path) -> int:
@@ -104,6 +123,7 @@ def _wait_ready(cfg, timeout: int = 60) -> None:
 
 def main() -> int:
     load_dotenv(PROJECT_ROOT / ".env")
+    _setup_logging()
     cfg = db_config_from_env("MYSQL", engine="mysql", defaults=_MYSQL_DEFAULTS)
     errors: list[str] = []
     summary = []
