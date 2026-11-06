@@ -2,7 +2,7 @@
 
 电商用户行为数据仓库与实时分析平台。
 
-**阶段进度：Phase 1（数据探索与契约）、Phase 2（ODS 贴源入库）、Phase 3（DWD 明细标准化）已完成**（见「当前状态」）。尚未实现 DWS 汇总/ADS 应用、Airflow 编排、Superset 看板或实时链路。
+**阶段进度：Phase 1（数据探索与契约）、Phase 2（ODS 贴源入库）、Phase 3（DWD 明细标准化）、Phase 4（DWS 汇总建模 + ADS 指标应用）已完成**（见「当前状态」）。尚未实现 Airflow 编排、Superset 看板或实时链路。
 
 目标形态（后续 Phase）：Retailrocket 用户行为数据 → MySQL 四层数仓（ODS / DWD / DWS / ADS）→ Airflow 编排 → Superset 看板；之后扩展 Kafka + Flink 实时链路。
 
@@ -26,6 +26,15 @@
   恒等式 `2,756,101 = 2,755,641 + 460 + 0` 由 `cli verify` 校验通过；
   去重后事件分布 view 2,664,218 / add_to_cart 68,966 / transaction 22,457，
   行级实测与按日重建幂等实测见 `docs/dwd_design.md` §9。
+- **Phase 4 ✅ 已完成**：DWS/ADS 建模与指标落地——纯 SQL 服务端聚合
+  （`INSERT ... SELECT`，Python 内存有界），3 张 DWS 日汇总表
+  （`dws_user_daily` / `dws_item_daily` / `dws_category_daily`）+ 4 张 ADS 应用表
+  （`ads_traffic_daily` PV/UV/DAU、`ads_funnel_daily` 漏斗长表 9 口径、`ads_item_ranking_daily`
+  商品日排行 Top-100、`ads_retention_cohort` 次日留存），支持 FULL / DATES 幂等重建与
+  `dws_ads_build_log` 批次审计，构建内不变量 + `verify` 独立 SQL 复算双闸门。
+  **全量构建已完成（build #1 LOADED，3,431,482 行 / 7 表，164.5s）**：
+  PV 全区间 2,649,436、区间 UV 1,396,937、D1 留存 2.75%，`verify` 1,668 checks
+  全窗口 ALL MATCH，设计见 `docs/dws_ads_design.md`，代码在 `src/ecommerce_dw/dws/`。
 - 可复用流式统计模块在 `src/ecommerce_dw/eda/`（无数据库、只读本地 CSV）。
 - 工程骨架 + 两个数据库的容器编排文件（`docker-compose.yml`）。
 - 容器运行时为 **WSL2 内的 Docker Engine**（Windows 侧无 `docker` 命令，见「已验证环境」）；MySQL / PostgreSQL 容器已实际启动并通过健康检查。
@@ -118,6 +127,15 @@ pytest
 - **DDL**：`scripts/apply_dwd_ddl.py` 应用 `sql/ddl/dwd_*.sql`（5 张表）。
 - **转换核心**：`src/ecommerce_dw/dwd/transform.py`（纯函数，`TRANSFORM_VERSION="1"`）。
 
+### Phase 4 DWS 汇总 / ADS 应用层
+
+- **设计文档**：`docs/dws_ads_design.md`（表结构/粒度/口径/重建语义/独立复核/生产实测）。
+- **构建**：`python -m ecommerce_dw.dws.cli build [--dates ...] [--top-n N] [--force]`
+  （全量 / 按 UTC 日幂等重建；另提供 `verify` / `status` / `cleanup` 子命令）。
+- **DDL**：`scripts/apply_dws_ads_ddl.py` 应用 `sql/ddl/dws_*.sql` + `ads_*.sql`（8 张表）。
+- **聚合核心**：`src/ecommerce_dw/dws/`（`agg_sql.py` 纯 SQL 语句、`builder.py` 构建编排、
+  `constants.py` 口径常量，`AGG_VERSION="1"`）。
+
 ## Docker（数据库）启停
 
 > 前提：容器运行时已就绪。本机经实际验证的是 **WSL2 内的 Docker Engine 29.9.3**
@@ -202,6 +220,7 @@ ecommerce-data-platform/
 │  ├─ eda/                # Phase 1：无库流式统计
 │  ├─ ingestion/          # Phase 2：ODS 分块幂等装载
 │  └─ dwd/                # Phase 3：DWD 构建（transform / builder / cli）
+├─ src/ecommerce_dw/dws/  # Phase 4：DWS/ADS 聚合（agg_sql / builder / cli / constants）
 ├─ sql/{ddl,dml,checks}/  # 数仓建模 SQL（后续 Phase 使用）
 ├─ airflow/dags/          # Airflow DAG（后续 Phase）
 ├─ streaming/             # Kafka + Flink 实时链路（后续 Phase）
@@ -220,9 +239,11 @@ ecommerce-data-platform/
 - 容器运行时已就绪且 Phase 0 容器相关交付物已实测通过（WSL2 内 Docker Engine，
   见「已验证环境」）；若日后迁到 Docker Desktop 或 CI 环境，以「已验证环境」为基线重新核对。
 - Phase 3 DWD 全量构建在 WSL 里的 MySQL 上实测通过（行数恒等式成立，见
-  `docs/dwd_design.md` §9）；下次启动前先 `docker compose up -d` 并等待 MySQL 健康。
-- `docs/architecture.md` 中包含完整 Roadmap；下一阶段为「Phase 4：DWS 维度建模与
-  指标汇总聚合」，读取目标为 `dwd_events`（去重后标准明细）。
+  `docs/dwd_design.md` §9）；Phase 4 DWS/ADS 全量构建同样实测通过（build #1，
+  `verify` ALL MATCH，见 `docs/dws_ads_design.md` §8）；下次启动前先
+  `docker compose up -d` 并等待 MySQL 健康。
+- `docs/architecture.md` 中包含完整 Roadmap；下一阶段为「Phase 5：Airflow 编排」，
+  读取目标为 ADS 层输出 + DWD 明细。
 
 ## 安全说明
 
