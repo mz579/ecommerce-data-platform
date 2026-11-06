@@ -1,0 +1,3 @@
+# Windows 下统一 LF 行尾，消除 CRLF 警告；文本文件入库时自动归一化。
+# 当前项目不含 .bat / .ps1；如后续引入且确需 CRLF，再单独追加对应规则。
+* text=auto eol=lf
