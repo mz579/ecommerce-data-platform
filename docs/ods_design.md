@@ -88,7 +88,9 @@ PENDING ──成功──► LOADED
 1. **预检**：计算文件 SHA-256；读取并校验表头（列顺序必须与契约一致）。
 2. **幂等判断**（见 §4.2）：查询 `etl_batch_log`：
    - 同 `(source_file, file_sha256)` 已有 `LOADED` → **跳过**（不新开批次，不再写一行）；
-   - 存在 `PENDING` / `FAILED` 未清理 → **拒绝**并提示先 `cleanup`（防脏续跑）；
+   - 同 `(source_file, file_sha256)` 存在 `PENDING` → 判定为「上次运行进程被中断」，
+     **就地续传该批次**（§3.1/§3.2，同一 `batch_id`，不清掉已提交行）；
+   - 存在 `FAILED` 或「SHA-256 不同」的 `PENDING` → **拒绝**并提示先 `cleanup`（防脏续跑）；
    - 都不是 → 登记 `PENDING` 批次，进入加载。
 3. **加载**：`csv.reader` 逐行流式读取，攒够 `chunk_size`（默认 10,000）行后
    `executemany` 多行 INSERT，**每块一个事务**、逐块 commit，内存占用恒定
@@ -101,18 +103,42 @@ PENDING ──成功──► LOADED
 
 ### 3.1 失败恢复 / 断点续跑
 
-失败批次（`PENDING` / `FAILED`）的处理流程：
+批次未完成时先分两种情况：
+
+- **进程还活着、只是 MySQL 断连** → §3.2 的**进程内自动续传**（无需人工干预）。
+- **进程已被终止 / 退出**（遗留 `PENDING` 批次）或**批次曾出错**（遗留 `FAILED` 批次）→
+  下一次运行按下表自动处理，也可人工介入：
 
 ```text
-① 查看失败原因    uv run python -m ecommerce_dw.ingestion.cli status
-② 清理失败批次    uv run python -m ecommerce_dw.ingestion.cli cleanup --batch <batch_id>
-                  （删除该批次已提交的部分行，日志置 CLEANED，保留审计轨迹）
-③ 修复后重跑      uv run python -m ecommerce_dw.ingestion.cli load <file>
-                  （自动开新批次；表头校验 + 唯一键双保险，永不重复写已存在的行）
+同一 PENDING + SHA-256 不变  →  就地续传（resume）：SELECT COUNT(*) 统计该批次
+                                 已提交行数，从下一行继续写入，batch_id 不变；
+                                 进程被杀死绝不丢失已提交的行（实测见 §6.4 故障 4）
+FAILED 批次                  →  必须先清理：cleanup --batch <id>（删行 + 置 CLEANED）
+PENDING 但 SHA-256 已变化     →  说明源文件被换过，同样必须先清理再重灌
+```
+
+人工流程（`uv run python -m ecommerce_dw.ingestion.cli`）：
+
+```text
+① 查看批次状态  status                     （看哪个文件卡在 PENDING / FAILED）
+② 清理失败批次  cleanup --batch <batch_id>
+                （删除该批次已提交的部分行，日志置 CLEANED，保留审计轨迹）
+③ 重新加载      load <file>
+                （续传语义自动生效：PENDING 同哈希继续、其余开新批次）
 ```
 
 `cleanup --file <source_file>` 可一次清掉某文件所有批次。清理只作用于
 `ingest_batch_id = batch_id` 的行，绝不触碰其他批次数据。
+
+### 3.2 连接丢失自动续传（进程存活）
+
+加载过程中 MySQL 因重启/失联而断连时，加载器**不结束批次**：
+
+1. 回滚当前未提交块（`INSERT IGNORE` 之下重放也是 no-op，见 §4.2）；
+2. 轮询重连（每 5 秒探测一次，单次等待上限 `resume_wait_seconds`，可重试
+   `max_resumes` 次，全程不退出进程）；
+3. `SELECT COUNT(*) where ingest_batch_id = batch_id` 拿到已提交行号，继续从下一行
+   写入——**同一进程、同一 `batch_id`、已提交行一个不丢**（实测见 §6.4 故障 1）。
 
 ## 4. 幂等键规则（重点）
 
@@ -166,5 +192,119 @@ src/ecommerce_dw/ingestion/
 
 ## 6. 实测结果（本机真实执行）
 
-（§6 由实际导入后填写：四个文件的 SHA-256、导入耗时、行数对账、重复导入验证，
-以及 20M 行的性能策略与结论。）
+### 6.1 源文件指纹（SHA-256，导入前计算）
+
+| 源文件 | 字节数 | SHA-256 |
+| --- | --- | --- |
+| `category_tree.csv` | 14,454 | `94e865eb0a3d48cbbfe3b79079018dd92509315c88f5fd8d00d0b4b5af434f5b` |
+| `events.csv` | 94,237,913 | `3745aa83238b1e6d44d8fda209807899f420084398f94ddf745f3cbcfecbf9e7` |
+| `item_properties_part1.csv` | 484,315,749 | `30aad5aeca58b2dc27dcc73e1708565f5818e45adb3eb57401f91e87355b0b81` |
+| `item_properties_part2.csv` | 408,929,907 | `d5e7d1a91dc40f522aeb596b267e6c87d8aed689a7192d12369cfb165eb987e5` |
+
+### 6.2 运行环境特征（为什么设计成"可断点恢复"）
+
+开发机上的 WSL2 虚拟机每几分钟整体重启一次（docker daemon 启动时间与 `uptime`
+持续归零），MySQL 容器随之反复失联。15 分钟连通性采样显示 **可用率约 11%**
+（27 次 OK / 240 次采样，窗口集中在每次 VM 启动后的 30~60 秒，随后再次重启）。
+命名卷让数据跨重启持久化，但这意味着任何"一次性连上、一口气导完"的脚本都不可能
+稳定跑完 —— 分块 + INSERT IGNORE + 批内自动续传（§3.1）是让 2200 万行在这种
+环境下仍可推进的前提。
+
+### 6.3 性能策略（20M 行的速度与内存取舍）
+
+| 手段 | 说明 |
+| --- | --- |
+| 分块流式读取（`chunk_size`） | 默认 10,000 行/块；`events` 与两个 `item_properties` 用 **50,000 行/块**。每块一个事务一次 commit，削减 InnoDB fsync 次数（本机单次 commit 约 150–400ms，是每个可用窗口内的主要开销） |
+| 单语句批量 INSERT | `cursor.max_stmt_length = 8MB`，`executemany` 把一块 5 万行拼成一条多值 INSERT，避免逐行网络往返 |
+| `INSERT IGNORE` | 连接在块提交瞬间断裂时，重放该块是 no-op；配合 `(source_file, source_row_number)` 唯一键，行数永不虚增 |
+| 内存上界 | 任意时刻只保留 ≤ 一个块（5 万行 × 4~5 列的参数元组 ≈ 数十 MB），CSV 逐行流式丢弃；从不把 480MB 的源文件整体读进内存 |
+| 实测吞吐 | 可用窗口内约 **4–5 万行/秒**（含解析 + 哈希 + 插入 + commit），单次 10~15 秒窗口可提交 20–60 万行 |
+
+行数、耗时与对账结果见下（每次执行后填写真实数字）。
+
+### 6.4 断点恢复实测（本机真实故障实录）
+
+> 本节记录**真实发生**的故障与恢复：2026-11-06 晚间加载 `events.csv`（2,756,101 行）期间，
+> WSL2 虚拟机分别在 **22:09、22:44、22:55、23:03** 被关机/重启（Docker 守护进程与 MySQL
+> 容器随之反复失联；连通性采样显示 MySQL 可用率仅约 11%）。以下批次状态、恢复动作与耗时
+> 均取自 `etl_batch_log` 与 `logs/ods_ingestion.log` 原始记录。
+
+**故障 1 — 批次中途断连（自动续传，无需人工干预）**
+
+加载 `events.csv` 的批次在插入过程中多次遇到连接丢失，加载器按 §3.1/§4 自动处理：
+
+| 时刻 | 事件 | 恢复动作 |
+| --- | --- | --- |
+| 22:09:04 | `Server shutdown in progress`，第 1 轮已提交 ~51 万行 | 回滚当前块 → 重连 → 从 `source_row_number=510002` 续传（无重复/丢失） |
+| 22:44:56 | `MySQL server has gone away`，第 2 轮已提交 ~15 万行 | 重连 → 从 `150002` 续传 |
+| 22:55:17 | `Lost connection`，第 3 轮已提交 ~60 万行 | 重连 → 从 `600002` 续传 |
+| 23:03:51 | `Lost connection`，第 4 轮已提交 ~80 万行 | 重连 → 从 `800002` 续传，23:04:45 恢复到 100 万行 |
+
+单次断连→恢复**约 10–90 秒**（含重连轮询）。进程内 `batch_id` 保持不变，最终只会出现
+唯一的 `LOADED` 批次，行数 = 源文件行数。
+
+**故障 2 — 进程被终止留下 PENDING 批次（手工清理重灌）**
+
+为提高吞吐（§6.3，分块 10k→50k）主动停掉第 1 轮进程，`events.csv` 遗留一个 `PENDING`
+批次（#16，已提交约 70 万行）。第 2 轮启动时按"失败批次清理后重跑"流程处理：
+
+```text
+22:35:17  INFO loader: batch #16 cleaned: removed 700000 rows from ods_events_raw
+           → _cleanup_incomplete / loader.cleanup_batch：
+             DELETE ... WHERE ingest_batch_id = 16 → status=CLEANED → 开新批次 #17 重灌
+```
+
+清理 + 重灌全程约 **10 分钟**（含等待下一个 MySQL 可用窗口）。验证了三条验收要求：
+失败批次可清理、清理后重跑结果与全新导入一致、每行只归属唯一批次。
+
+**故障 3 — 半截批次可被发现（对账依据）**
+
+`etl_batch_log` 与表 `COUNT(*)` 对比是发现半截批次的手段：`PENDING` 批次的
+`row_count` 在完成前恒为 0（完成后才回填），但表中 `source_file` 分组计数已含其已提交行；
+`LOADED` 批次的 `row_count` 必须等于表中对应 `source_file` 的行数。故障期间两处数字的偏差
+均被解释为"在途 PENDING 批次"，无数据丢失，也无不属于任何批次的行。
+
+**故障 4 — 进程被系统杀死后跨进程续传（本次最重的一次）**
+
+加载 `item_properties_part1.csv`（10,999,999 行）期间，后台驱动进程**被系统以内存原因
+直接杀死**（会话空闲 + 系统内存吃紧，非 MySQL 故障）。此时批次 #18 已提交 5,600,000 行，
+但日志仍为 `PENDING`（尚未 `mark_loaded`）。杀掉进程前这 5.6M 行已落库且已 commit。
+
+重启驱动进程后，加载器在**启动后第一分钟内**自动识别并就地续传，未删任何已提交行：
+
+```text
+23:50:53  INFO loader: resume batch #18 for item_properties_part1.csv
+          (5600000 rows already committed by the interrupted run)
+          → SELECT COUNT(*) WHERE ingest_batch_id = 18 = 5,600,000
+          → 从 source_row_number = 5600002 继续写入，batch_id 仍为 18
+```
+
+恢复耗时：**进程重启 → 检测到残留批次 → 开始续传 ≈ 数秒**（不含后续加载本身）。
+对比故障 2 的"清理 + 重灌"（约 10 分钟、且要重写 70 万行），跨进程续传把影响降到
+**零重写、零丢弃**：5.6M 已提交行全部保留，批次对账见 §6.5。
+
+### 6.5 最终导入结果与重复导入对账
+
+**2026-11-06 晚至 11-07 凌晨全量导入完成**（`etl_batch_log` 实测，时间戳为本地时区，
+库内以 UTC 存储）。
+
+| 源文件 | 目标表 | 批次 | 最终行数 | batch 跨度（start→finish） | 进程内耗时（loader 计时） | 对账 `COUNT(*)` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `category_tree.csv` | `ods_category_tree_raw` | #15 | **1,669** | 22:08:51→22:08:51 | 0.1s | 1,669 OK |
+| `events.csv` | `ods_events_raw` | #17 | **2,756,101** | 22:35:17→23:13:40 | 2302.9s（约 38 min） | OK |
+| `item_properties_part1.csv` | `ods_item_properties_raw` | #18 | **10,999,999** | 23:13:47→00:32:45 | 续传段 2512.5s（约 42 min，含重连等待） | OK |
+| `item_properties_part2.csv` | `ods_item_properties_raw` | #28 | **9,275,903** | 00:32:56→01:48:52 | 4555.6s（约 76 min，含重连等待） | OK |
+| **合计** | — | — | **23,033,672** | — | — | 全 OK |
+
+说明：
+
+- **耗时是墙钟时间，包含本机每几分钟一次的 VM 重启等待**。`events` 批次跨度含 4 次断连自动
+  续传（§6.4 故障 1）；`part1` 跨度含进程被杀后的空窗（23:13 登记 → 23:44 达 5.6M →
+  23:50 跨进程续传 → 00:32 完成，§6.4 故障 4）；可用窗口内净写入吞吐约 4–5 万行/秒（§6.3）。
+- **重复导入对账（幂等实测）**：全量完成后重跑 `scripts/load_all_ods.py`，四个文件全部
+  `skipped: already loaded as batch #…`，脚本退出码 0、`ALL GOOD`；随后独立的
+  `SELECT COUNT(*) WHERE source_file=…` 复核仍为
+  `1,669 / 2,756,101 / 10,999,999 / 9,275,903`，**行数零增长**。
+- **批次一致性**：每个 `LOADED` 批次的 `etl_batch_log.row_count` 与表中
+  `ingest_batch_id = batch_id` 的 `COUNT(*)` 逐一相等；清理日志 #16（events 早期 PENDING 批次）
+  删尽后 0 行残留、状态 `CLEANED`。全库每个文件的行都唯一归属一个批次，无孤儿行。
