@@ -233,8 +233,8 @@ Phase 2 已有 ODS 装载日志 `etl_batch_log`，三个实质理由支持独立
 
 ## 8. 时区与零日期行语义
 
-- 全链路 UTC。毫秒时间戳 → `datetime.fromtimestamp(ms, UTC)` 的 naive-UTC 表示 →
-  `DATETIME(3)`（毫秒位保留）；`event_date_utc = ts // 86400000`（UTC 世界时，
+- 全链路 UTC。毫秒时间戳经 `ms_to_utc_datetime`（`1970-01-01 + timedelta(ms)`，naive-UTC）
+  → `DATETIME(3)`（毫秒位保留）；`event_date_utc = ts // 86400000`（UTC 世界时，
   **不做**任何本地时区换算）。
 - **零日期行**（`invalid_timestamp`）：没有 UTC 日 → `event_date_utc=NULL`。任何
   `DATES` scope 都必须显式包含它们（`_ods_where` 里 `OR CAST(timestamp AS UNSIGNED)=0`，
