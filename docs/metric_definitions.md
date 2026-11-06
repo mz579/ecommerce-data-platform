@@ -1,4 +1,4 @@
-# 指标口径定义（Phase 1）
+# 指标口径定义（Phase 1 · DWD 采用版）
 
 > 本文档定义 Phase 4（DWS/ADS）将要实现的业务指标。所有指标的边界条件
 > （分母为 0、观察窗口不完整、去重口径、时区）预先在此钉死，避免建模时
@@ -7,17 +7,28 @@
 >
 > Phase 1 只给出口径与边界，不产出最终指标值（除可直接统计的原始量）；
 > 指标数值在 Phase 4 DWS 聚合中落地后回填此处。
+>
+> **Phase 3 DWD 采用本口径**（见 `docs/data_contract.md` §2.2）：所有 `event = 'X'`
+> 一律写为 `event_type = 'X'`，事件类型使用 **DWD 标准枚举 `{view, add_to_cart,
+> transaction}`**（原始 `addtocart` 拼写在 ODS 及 DWD `raw_event_type` 列保真）。
+> 指标在 DWD 明细之上计算，列名对应关系：`visitorid` → `visitor_id`（哨兵 `"0"` →
+> NULL + `visitor_zero` flag）、`itemid` → `item_id`、`transactionid` →
+> `transaction_id`、`day(timestamp)` → `event_date_utc`。精确重复行已在 DWD
+> 抽离至 `dwd_events_duplicate`（全量 460 行），指标默认使用去重后的标准事件
+> （需要时可把重复表对应行补回，两套口径都可在 DWD 上闭合）。
 
 ## 0. 通用约定（适用于所有指标）
 
 - **时区**：一律 UTC。events 无显式时区，按 UTC 解读后窗口为
   2015-05-03 03:00:04 ~ 2015-09-18 02:59:47（139 个 UTC 日）。
-- **行归属日**：`timestamp`（毫秒）→ UTC 日期。临界毫秒属于哪个日，
-  用 `day = ts//86400000`（UTC 世界时）确定，不做本地时区换算。
+- **行归属日**：`event_time_utc`（毫秒 → 时间戳）→ `event_date_utc`。临界毫秒
+  属于哪个日，用 `day = ts//86400000`（UTC 世界时）确定，不做本地时区换算。
 - **visitorid 语义**：匿名 Cookie 标识，非注册用户。`visitorid="0"` 共 3 行
   视作哨兵值：**计入 count、不计入 distinct user**（口径在数据契约中钉死，
-  不静默丢弃）。
-- **dataset 事实速查**（全量扫描结果）：
+  不静默丢弃）。DWD 中对应 `visitor_id`，哨兵 `"0"` 置 NULL + `visitor_zero` flag，
+  distinct 口径一律 `visitor_id IS NOT NULL`。
+- **dataset 事实速查**（全量扫描结果；事件名列使用 ODS 原始拼写 `addtocart`，
+  DWD 标准名为 `add_to_cart`，行数不变）：
 
 | 量 | 值 |
 | --- | --- |
@@ -32,48 +43,57 @@
 | events 覆盖 UTC 日数 | 139 |
 | item_properties 行 / 去重商品 | 20,275,902 / 417,053 |
 
+> 上表为 **ODS 原始行口径**。Phase 3 DWD 按业务键去重后各 `event_type`
+> 的标准行数见 `docs/dwd_design.md` §测量；任意事件的总量恒等式为
+> `ods_events_raw = dwd_events + dwd_events_duplicate + dwd_events_reject`。
+
 ---
 
 ## 1. PV（页面浏览量 / Page View）
 
 - **业务定义**：站点页面被浏览的次数，衡量流量体量。
-- **分子**：`event = 'view'` 的事件行数。
+- **分子**：`event_type = 'view'` 的事件行数。
 - **分母**：无（绝对量指标）。
-- **过滤条件**：`event = 'view'`；`timestamp` 在观察区间内（UTC 日分区）；
-  不做 visitor 过滤（含未知 visitor 的 view 仍算一次浏览）。
+- **过滤条件**：`event_type = 'view'`；`event_time_utc` 在观察区间内
+  （UTC 日分区）；不做 visitor 过滤（含未知 visitor 的 view 仍算一次浏览）。
 - **去重口径**：**不去重**。同一 visitor 连点刷新计多次；同一毫秒多行计多次。
 - **时区**：UTC。
 - **边界情况**：无分母。需要决定是否把 `view` 同秒内的多行合并为 1（广告统计
   惯例），留到 ADS 按产品需求定，默认**不合并**（保持计量一致性与可校验性）。
-- **实测锚点**：全量 `view` = 2,664,312 行。毫秒级时间戳重叠请区分两个数：
-  2,756,101 行只落在 2,750,455 个不重复毫秒值上，冗余行 **5,646**
+- **实测锚点**：全量 `view` = 2,664,312 行（ODS 原始行）。毫秒级时间戳重叠请区分
+  两个数：2,756,101 行只落在 2,750,455 个不重复毫秒值上，冗余行 **5,646**
   （= 2,756,101 − 2,750,455）；实际与他人共享同一毫秒的行数为 **10,795**
   （分布在 5,149 个共享毫秒值上）。PV 不去重，直接计行数。
+- **与 DWD 去重的衔接**：DWD 会把**完全相同的行**（业务键相同、仅
+  `source_row_number` 不同；全量 460 行 = 458 个 dedup_key）抽到
+  `dwd_events_duplicate`。PV 在 DWD 之上默认计**去重后**的 `view` 标准行
+  （同毫秒多行、同人连点仍各计一次）；若产品想连精确重复行一起算，
+  把 `dwd_events_duplicate` 中对应行加回即可，两套口径都可在 DWD 上闭合。
 
 ## 2. UV（独立访客数 / Unique Visitors）
 
 - **业务定义**：**指定日期内发生过 `view` 行为的独立访客数**（项目基线口径，
   见主方案 §2.3：UV = 指定日期内发生 view 的去重 visitor_id 数）。
-- **分子**：`event = 'view'` 的 distinct `visitorid`。
+- **分子**：`event_type = 'view'` 的 distinct `visitor_id`。
 - **分母**：无。
-- **过滤条件**：`event = 'view'`；`visitorid` 非空且 `≠ "0"`（哨兵值）；
-  `timestamp` 在观察区间内。
-- **去重口径**：按 visitorid 去重；跨日、跨月累计 UV 是同一个去重集合，**不等于
+- **过滤条件**：`event_type = 'view'`；`visitor_id IS NOT NULL`（哨兵 `"0"` 已置
+  NULL + `visitor_zero` flag）；`event_time_utc` 在观察区间内。
+- **去重口径**：按 visitor_id 去重；跨日、跨月累计 UV 是同一个去重集合，**不等于
   DAU 求和**。
 - **时区**：UTC。
 - **边界情况**：匿名 Cookie 会被清理/更换，UV 存在系统性高估。全量区间
   view 口径去重访客 = **1,404,178**（3 行 `"0"` 哨兵全是 view 事件、只对应同一个
-  值，按口径剔除该值后计数不变）；复现：`count(distinct visitorid) where
-  event='view' and visitorid != '0'`。
+  值，按口径剔除后计数不变）；复现：`count(distinct visitor_id) where
+  event_type='view' and visitor_id IS NOT NULL`。
 
 ## 2.1 全行为活跃访客数（任意行为去重访客，非 UV，勿与 §2 混用）
 
-- **业务定义**：观察区间内发生过**任意事件（view / addtocart / transaction）**的
+- **业务定义**：观察区间内发生过**任意事件（view / add_to_cart / transaction）**的
   独立访客数；与 UV 的区别是**不限定事件类型**。
-- **分子**：区间内 distinct `visitorid`。
+- **分子**：区间内 distinct `visitor_id`。
 - **分母**：无。
-- **过滤条件**：`visitorid` 非空且 `≠ "0"`（哨兵值）；`timestamp` 在区间内。
-- **去重口径**：按 visitorid 去重；跨日累计不叠加（≠ DAU 求和）。
+- **过滤条件**：`visitor_id IS NOT NULL`；`event_time_utc` 在区间内。
+- **去重口径**：按 visitor_id 去重；跨日累计不叠加（≠ DAU 求和）。
 - **时区**：UTC。
 - **边界情况**：匿名 Cookie 会被清理/更换，存在系统性高估。全量区间
   = 1,407,580（含哨兵值 `"0"` 1 个，去哨兵后 **1,407,579**）。本口径是「宽口径
@@ -82,11 +102,11 @@
 ## 3. DAU（日活跃用户数 / Daily Active Users）
 
 - **业务定义**：某 UTC 日内发生过任何行为的独立访客数。
-- **分子**：某日（UTC）`event` 任意类型、`visitorid` 非空且 ≠"0" 的 distinct
-  visitorid。
+- **分子**：某日（UTC）`event_type` 任意类型、`visitor_id IS NOT NULL`（哨兵
+  `"0"` 已置 NULL + flag）的 distinct visitor_id。
 - **分母**：无。
-- **过滤条件**：`day(timestamp) = 观察日`。
-- **去重口径**：日内按 visitorid 去重；跨日不累计、不串。
+- **过滤条件**：`event_date_utc = 观察日`。
+- **去重口径**：日内按 visitor_id 去重；跨日不累计、不串。
 - **时区**：UTC，日界为世界时零点。
 - **边界情况**：
   - **窗口不完整**：数据首日 2015-05-03 自 03:00 UTC 起、末日 2015-09-18 至
@@ -97,15 +117,15 @@
 ## 4. 加购用户数（加购人数 / Add-to-Cart Users）
 
 - **业务定义**：观察区间内至少发生过一次加购的独立访客数。
-- **分子**：distinct `visitorid` where `event = 'addtocart'`。
+- **分子**：distinct `visitor_id` where `event_type = 'add_to_cart'`。
 - **分母**：无。
-- **过滤条件**：`event = 'addtocart'`；区间过滤。
-- **去重口径**：visitorid 级去重（一人多次加购只算 1 人）。
+- **过滤条件**：`event_type = 'add_to_cart'`；区间过滤。
+- **去重口径**：visitor_id 级去重（一人多次加购只算 1 人）。
 - **时区**：UTC。
 - **边界情况**：无分母；若与“加购件数”区分，件数口径=行数不去重。
-- **实测锚点**：全量 `addtocart` **事件行** = 69,332（占事件总量 2.52%，事件口径，
-  **不是用户数**）；去重加购用户 = **37,722**（`distinct visitorid where
-  event='addtocart'`，即本指标精确分子）。
+- **实测锚点**：全量 `addtocart`（ODS 原始值）**事件行** = 69,332（占事件总量
+  2.52%，事件口径，**不是用户数**）；去重加购用户 = **37,722**
+  （`distinct visitor_id where event_type='add_to_cart'`，即本指标精确分子）。
 
 ## 5. 加购率（Add-to-Cart Rate）
 
@@ -114,12 +134,12 @@
   - 分子：加购用户数（第 4 节）。
   - 分母：同期**浏览用户数**（= §2 UV，view 口径）。
 - **口径 B（事件级，辅助）**
-  - 分子：`addtocart` 事件行数。
-  - 分母：`view` 事件行数（页面级点击密度）。
+  - 分子：`event_type = 'add_to_cart'` 事件行数。
+  - 分母：`event_type = 'view'` 事件行数（页面级点击密度）。
 - **时区**：UTC；分子分母必须落在同一观察区间（同一 UTC 日或全区间）。
 - **边界情况**：
   - **分母为 0**：空日（浏览用户数 / UV = 0）加购率未定义，输出空值而非 0 或除零错误；
-    事件级 B 同理（无 view 但有 addtocart 的理论情形也要覆盖）。
+    事件级 B 同理（无 view 但有 add_to_cart 的理论情形也要覆盖）。
   - **口径漂移风险**：A 是”人“口径、B 是”行为密度“口径，**不可混用**；
     报告中必须标注用的是哪个口径（默认 A）。
   - **非天然嵌套（实测）**：37,722 名加购用户中有 3,321 名从未产生过 `view`
@@ -133,16 +153,16 @@
 
 - **业务定义**：观察区间内至少发生一笔成交的独立访客数（**人头口径**，
   与“成交订单数”区分）。
-- **分子**：distinct `visitorid` where `event = 'transaction'`。
+- **分子**：distinct `visitor_id` where `event_type = 'transaction'`。
 - **分母**：无。
-- **过滤条件**：`event = 'transaction'`；区间过滤。
-- **去重口径**：visitorid 级去重。
+- **过滤条件**：`event_type = 'transaction'`；区间过滤。
+- **去重口径**：visitor_id 级去重。
 - **时区**：UTC。
 - **边界情况**：
-  - 与“订单数”严格区分：订单数需按 `transactionid` 去重，且
-    `transactionid` 是订单级标识 —— 22,457 行 transaction 事件只对应
+  - 与“订单数”严格区分：订单数需按 `transaction_id` 去重，且
+    `transaction_id` 是订单级标识 —— 22,457 行 transaction 事件只对应
     **17,672 个不同 transactionid**（2,710 个 ID 跨多行，单 ID 最多 31 行），
-    说明一行 transaction ≠ 一单。订单数 = distinct(transactionid) 才正确。
+    说明一行 transaction ≠ 一单。订单数 = distinct(transaction_id) 才正确。
   - 无交易日的指标值为空/0，保留。
 - **实测锚点**：全量 `transaction` 事件行 22,457 对应 **11,719** 名去重用户（即本指标精确分子）；其中 428 名从未产生过 `view`，转化率的严格漏斗口径分子为 11,291（见 §7）。
 
@@ -150,22 +170,22 @@
 
 - **业务定义**：整体漏斗顶（浏览）到底（成交）的转化强度。**默认取严格漏斗口径**，
   另设全局转化口径（备选），两者名字必须区分，非默认口径输出时显式标注。
-- **分子（严格漏斗口径，默认）**：观察区间内 distinct `visitorid` with
-  `event='transaction'` **且**在区间内有过 `view`（= 交易用户 ∩ 浏览用户）。
+- **分子（严格漏斗口径，默认）**：观察区间内 distinct `visitor_id` with
+  `event_type='transaction'` **且**在区间内有过 `view`（= 交易用户 ∩ 浏览用户）。
   全量区间实测 = **11,291**；由此天然保证 分子 ⊆ 分母。
-- **分子（全局转化口径，备选）**：观察区间内全部 distinct `visitorid` with
-  `event='transaction'`（全量区间实测 = **11,719**）。**没有**“分子 ≤ 分母”约束，
+- **分子（全局转化口径，备选）**：观察区间内全部 distinct `visitor_id` with
+  `event_type='transaction'`（全量区间实测 = **11,719**）。**没有**“分子 ≤ 分母”约束，
   单日转化率可以合法超过 100%（见边界情况），不作为质量告警条件。
 - **分母**：同期**浏览用户数**（= §2 UV，view 口径；转化漏斗的上游）。
 - **过滤条件（主方案 §2.3 在分子/分母上的落实）**：
-  - **同一用户**：分子 / 分母各自按 visitorid 去重后做比率，是 person-level 的；
+  - **同一用户**：分子 / 分母各自按 visitor_id 去重后做比率，是 person-level 的；
     不允许用“分子取自 A 用户、分母取自 B 用户”的两张口径不同的集合叠加。
   - **同一窗口**：分子、分母必须落在同一 UTC 日（分日）或同一全区间（区间），
     不跨窗口混配。
   - **事件顺序**：默认**不强求**——窗口内既出现 view 又出现 transaction 即算转化
     （严格漏斗口径只要求存在性，不要求 view 在 transaction 之前）；若业务要求
     “先浏览后成交”，作为 Phase 4 独立变体口径另行命名，不与本指标混算。
-- **去重口径**：visitorid 级；严格漏斗口径下 分子 ⊆ 分母恒成立，无需额外约束；
+- **去重口径**：visitor_id 级；严格漏斗口径下 分子 ⊆ 分母恒成立，无需额外约束；
   全局口径下**没有**“分子必然 ≤ 分母”的不变量（分子 > 分母是合法数据）。
 - **时区**：UTC。
 - **边界情况**：
@@ -188,9 +208,9 @@
   （交集大小）。
 - **分母**：`{visitors first seen on D0}` 大小（cohort 规模）。
 - **过滤条件**：
-  - cohort 定义基于**首次观测日** = `min(day(timestamp))` per visitorid；
-  - D+1 行为不限事件类型（view/addtocart/transaction 任意）。
-- **去重口径**：visitorid 级；分子分母同一次去重，分子 ≤ 分母应恒成立。
+  - cohort 定义基于**首次观测日** = `min(event_date_utc)` per visitor_id；
+  - D+1 行为不限事件类型（view / add_to_cart / transaction 任意）。
+- **去重口径**：visitor_id 级；分子分母同一次去重，分子 ≤ 分母应恒成立。
 - **时区**：UTC。
 - **边界情况**：
   - **分母为 0**（D0 无新访客）：留存率未定义 → 输出空，不除零。
@@ -211,35 +231,35 @@
 ```
 metric = DAU
  grain   = daily(UTC)
- scope   = events.csv, event in {view, addtocart, transaction}
- dedup   = visitorid
- filter  = visitorid != "0" and timestamp in [window]
+ scope   = dwd_events, event_type in {view, add_to_cart, transaction}
+ dedup   = visitor_id
+ filter  = visitor_id IS NOT NULL and event_date_utc in [window]
  tz      = UTC
 ```
 
 ```
 metric = UV
  grain   = interval / daily(UTC)
- scope   = events.csv, event = 'view'
- dedup   = visitorid
- filter  = event = 'view' and visitorid != "0" and timestamp in [window]
+ scope   = dwd_events, event_type = 'view'
+ dedup   = visitor_id
+ filter  = event_type = 'view' and visitor_id IS NOT NULL and event_date_utc in [window]
  tz      = UTC
 ```
 
 ```
 metric = 全行为活跃访客数
  grain   = interval
- scope   = events.csv, event in {view, addtocart, transaction}
- dedup   = visitorid
- filter  = visitorid != "0" and timestamp in [window]
+ scope   = dwd_events, event_type in {view, add_to_cart, transaction}
+ dedup   = visitor_id
+ filter  = visitor_id IS NOT NULL and event_date_utc in [window]
  tz      = UTC
 ```
 
 ```
 metric = 加购率(口径A)
  grain   = interval / daily(UTC)
- scope   = events.csv
- dedup   = visitorid（分子/分母各自按 §4 / §2 口径去重，不天然嵌套）
+ scope   = dwd_events
+ dedup   = visitor_id（分子/分母各自按 §4 / §2 口径去重，不天然嵌套）
  filter  = 加购用户数(37,722) ÷ 浏览用户数(UV=1,404,178)，同区间/同日
  tz      = UTC
 ```
@@ -247,19 +267,19 @@ metric = 加购率(口径A)
 ```
 metric = 行为转化率(严格漏斗口径，默认)
  grain   = interval / daily(UTC)
- scope   = events.csv
- dedup   = visitorid（分子 = 交易用户 ∩ 浏览用户 = 11,291；分母 = 浏览用户）
- filter  = 分子: event='transaction' 且窗口内有过 view；
-          分母: event='view'（≠ "0"）；同窗口；事件顺序不强求
+ scope   = dwd_events
+ dedup   = visitor_id（分子 = 交易用户 ∩ 浏览用户 = 11,291；分母 = 浏览用户）
+ filter  = 分子: event_type='transaction' 且窗口内有过 view；
+          分母: event_type='view'（visitor_id IS NOT NULL）；同窗口；事件顺序不强求
  tz      = UTC
 ```
 
 ```
 metric = 行为转化率(全局口径，备选)
  grain   = interval / daily(UTC)
- scope   = events.csv
- dedup   = visitorid（分子 = 全部交易用户 = 11,719，可 > 分母）
- filter  = 分子: event='transaction'；分母: event='view'；同窗口
+ scope   = dwd_events
+ dedup   = visitor_id（分子 = 全部交易用户 = 11,719，可 > 分母）
+ filter  = 分子: event_type='transaction'；分母: event_type='view'；同窗口
  tz      = UTC；分子 > 分母合法，不告警
 ```
 
