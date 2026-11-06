@@ -2,12 +2,17 @@
 
 电商用户行为数据仓库与实时分析平台。
 
-**Phase 0（本阶段）**：完成工程初始化与骨架搭建。不实现任何 ETL、数仓建模、Airflow 编排、Superset 看板或实时链路。
+**Phase 1（本阶段）**：数据探索与数据契约——全量流式统计、字段画像、指标口径与数据契约。
+尚未实现 ETL、数仓建模、Airflow 编排、Superset 看板或实时链路。
 
 目标形态（后续 Phase）：Retailrocket 用户行为数据 → MySQL 四层数仓（ODS / DWD / DWS / ADS）→ Airflow 编排 → Superset 看板；之后扩展 Kafka + Flink 实时链路。
 
 ## 当前状态
 
+- **Phase 1 已完成**：全量数据探索（4 个 CSV，约 1GB）结论见
+  `notebooks/01_eda.ipynb`（已实际执行）；字段/指标口径/数据契约分别沉淀在
+  `docs/data_dictionary.md`、`docs/metric_definitions.md`、`docs/data_contract.md`。
+- 可复用流式统计模块在 `src/ecommerce_dw/eda/`（无数据库、只读本地 CSV）。
 - 工程骨架 + 两个数据库的容器编排文件（`docker-compose.yml`）。
 - 本机 Docker Desktop / WSL2 **尚未安装**，容器相关内容未实际启动验证（见「已知限制与下一步」）。
 - 业务数仓（MySQL）与 Airflow/Superset 元数据库（PostgreSQL）严格分离（见 `docs/architecture.md`）。
@@ -61,6 +66,14 @@ ruff format --check .
 # 冒烟测试（不依赖数据库）
 pytest
 ```
+
+## Phase 1 产物快速入口
+
+- **EDA notebook**：`notebooks/01_eda.ipynb`（已执行含图表，可 Restart & Run All 复现；
+  重新生成 cell 用 `python scripts/build_eda_notebook.py`）。
+- **流式统计模块**：`src/ecommerce_dw/eda/`——`scan_csv` 通用画像、
+  `summarize_events` / `summarize_item_properties` / `summarize_category_tree` 专项统计。
+- **口径文档**：`docs/data_dictionary.md`、`docs/metric_definitions.md`、`docs/data_contract.md`。
 
 ## Docker（数据库）启停
 
@@ -130,7 +143,7 @@ ecommerce-data-platform/
 ## 已知限制与下一步
 
 - Docker Desktop / WSL2 未安装（`docker` 命令不存在），Phase 0 **未**对容器做任何实际验证；安装 Docker 后若 compose 配置有问题，会在首次启动时修正。
-- `docs/architecture.md` 中包含完整 Roadmap；下一阶段从「Phase 1：数据探索与数据契约」开始。
+- `docs/architecture.md` 中包含完整 Roadmap；下一阶段从「Phase 2：ODS 入库与数据批次」开始。
 
 ## 安全说明
 
