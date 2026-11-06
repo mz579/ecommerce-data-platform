@@ -345,3 +345,96 @@ def test_pending_batch_is_resumed_in_place_after_interrupted_run(cfg, tmp_path, 
     assert len(loaded) == 1  # no duplicate log row
     assert loaded[0].batch_id == batch_id
     assert loaded[0].row_count == 3
+
+
+def test_overlong_cell_fails_batch_instead_of_silent_truncation(cfg, tmp_path, tracked):
+    """INSERT IGNORE must never silently truncate: over-wide cells abort the batch.
+
+    `property` is VARCHAR(128) in the DDL. A 200-char value must abort with a
+    FAILED batch whose error_summary names the source row and column — the value
+    must not be cut down to 128 chars and quietly stored (data contract: no
+    silent discarding).
+    """
+    ip_name = _unique_name("ods_it_long_")
+    src = _write_csv(
+        tmp_path / ip_name,
+        ["timestamp", "itemid", "property", "value"],
+        [
+            ["1435460400000", "1", "ok", "v"],  # source row 2, commits
+            ["1435460400001", "2", "x" * 200, "v2"],  # source row 3, too wide
+        ],
+    )
+    tracked(ip_name, _IP_TABLE)
+
+    with pytest.raises(loader.LoadError, match="load of"):
+        loader.load_csv(cfg, src, _IP_TABLE, chunk_size=1)
+    failed = [e for e in _find(cfg, ip_name) if e.status == "FAILED"]
+    assert len(failed) == 1
+    summary = failed[0].error_summary or ""
+    assert "row 3" in summary and "property" in summary
+    assert "ColumnTooLongError" in summary
+    assert failed[0].row_count == 1  # row 2 only; the too-wide row was refused
+    assert _count_by_batch(cfg, _IP_TABLE, failed[0].batch_id) == 1
+
+    # The over-long value must not have been truncated into the table.
+    conn = connect(cfg)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM ods_item_properties_raw "
+            "WHERE source_file = %s AND `property` = %s",
+            (ip_name, "x" * 200),
+        )
+        assert int(cur.fetchone()[0]) == 0  # not present even truncated
+    finally:
+        conn.close()
+
+
+def test_same_filename_changed_content_is_rejected_or_explicitly_replaced(cfg, tmp_path, tracked):
+    """A replaced file must never silently keep old rows (row-key collision).
+
+    row_key derives only from (filename, line number), so a new file under the
+    same name would collide with every old row. The loader therefore rejects it;
+    the documented replace flow (cleanup + reload, or --force) is the only way in.
+    """
+    name = _unique_name("ods_it_swap_")
+    src = _write_csv(
+        tmp_path / name,
+        ["timestamp", "visitorid", "event", "itemid", "transactionid"],
+        [
+            ["1433221332117", "1", "view", "10", ""],
+            ["1433221332118", "2", "view", "20", ""],
+        ],
+    )
+    tracked(name, _EVENTS_TABLE)
+    loader.load_csv(cfg, src, _EVENTS_TABLE)
+    assert _count(cfg, _EVENTS_TABLE, name) == 2
+
+    # Same filename, different bytes -> must be refused, old data untouched.
+    replaced = _write_csv(
+        tmp_path / name,
+        ["timestamp", "visitorid", "event", "itemid", "transactionid"],
+        [["1435999999999", "9", "transaction", "99", "77"]],
+    )
+    with pytest.raises(loader.BatchStateError, match="changed since batch"):
+        loader.load_csv(cfg, replaced, _EVENTS_TABLE)
+    assert _count(cfg, _EVENTS_TABLE, name) == 2
+
+    # Explicit replace flow: force reload clears the old rows and lands the new
+    # content under a fresh batch.
+    reloaded = loader.load_csv(cfg, replaced, _EVENTS_TABLE, force=True)
+    assert not reloaded.skipped
+    assert reloaded.rows_committed == 1
+    assert _count(cfg, _EVENTS_TABLE, name) == 1
+    assert sorted(e.status for e in _find(cfg, name)) == ["CLEANED", "LOADED"]
+    conn = connect(cfg)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT `visitorid` FROM ods_events_raw "
+            "WHERE source_file = %s AND source_row_number = 2",
+            (name,),
+        )
+        assert cur.fetchone()[0] == "9"
+    finally:
+        conn.close()

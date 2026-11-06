@@ -56,6 +56,16 @@ class BatchStateError(RuntimeError):
     """Raised when an existing batch blocks a fresh load (must be cleaned first)."""
 
 
+class ColumnTooLongError(ValueError):
+    """A raw CSV cell (or the filename) exceeds its target column's max width.
+
+    Raised *before* the chunk reaches MySQL: ``INSERT IGNORE`` bypasses
+    STRICT_TRANS_TABLES, so without this guard an over-long cell would be
+    silently truncated into the column width instead of refused (the data
+    contract forbids silent discarding).
+    """
+
+
 @dataclass(frozen=True)
 class LoadResult:
     """Outcome of a single load run (a skipped run reports no new rows)."""
@@ -114,10 +124,18 @@ def load_csv(
 
     - Skips (with a ``skipped=True`` result) if a batch with the same file SHA-256
       is already ``LOADED`` and ``force`` is False.
+    - Raises ``BatchStateError`` if the same filename was already ``LOADED`` with
+      a *different* SHA-256 (content changed): content updates must go through
+      ``force=True`` / ``cleanup --file`` first — the deterministic row keys would
+      otherwise collide with the old rows and everything would be silently skipped.
     - Raises ``BatchStateError`` if an incomplete (PENDING/FAILED) batch exists
       for the file and ``force`` is False.
     - With ``force=True`` deletes the file's rows and marks old batches CLEANED
       before loading a fresh batch.
+    - Fails the batch (``ColumnTooLongError``) if a cell exceeds its target
+      column's live width from ``information_schema`` — ``INSERT IGNORE`` would
+      otherwise silently truncate it. The error summary names the source row and
+      column.
     - Survives transient MySQL restarts: on connection loss it reconnects (up to
       ``max_resumes`` times, each wait bound by ``resume_wait_seconds``) and
       continues the same batch from the last committed row.
@@ -137,6 +155,12 @@ def load_csv(
 
     conn = connect(cfg)
     try:
+        limits = _length_limits(conn, spec.table_name)
+        slog = limits.get("source_file", 255)
+        if len(source_file) > slog:
+            raise ColumnTooLongError(
+                f"filename too long: '{source_file}' is {len(source_file)} > {slog} characters"
+            )
         repo = BatchLogRepo(conn)
         existing = repo.find_for_file(source_file)
         resume_batch = None
@@ -144,7 +168,17 @@ def load_csv(
         if existing and not force:
             loaded = [e for e in existing if e.status == "LOADED"]
             if loaded:
-                best = loaded[0]
+                fresh = [e for e in loaded if e.file_sha256 == file_sha256]
+                if not fresh:
+                    stale = loaded[0]
+                    raise BatchStateError(
+                        f"file {source_file!r} changed since batch #{stale.batch_id} "
+                        f"(sha256 {stale.file_sha256[:16]}... != {file_sha256[:16]}...); "
+                        "content updates need the explicit replace flow: "
+                        f"`cleanup --file {source_file}` then `load` again, "
+                        "or `load --force`"
+                    )
+                best = fresh[0]
                 logger.info(
                     "skip %s: already loaded as batch #%d (sha256=%s...)",
                     source_file,
@@ -221,6 +255,7 @@ def load_csv(
                         skip_rows -= base - chunk.start_row_number
                         if not rows:
                             continue
+                        _validate_cell_lengths(rows, base, spec, limits)
                         params = _params_for(rows, base, spec, source_file, batch_id, started)
                         cursor.executemany(insert_sql, params)
                         conn.commit()
@@ -288,6 +323,48 @@ def load_csv(
             cursor.close()
     finally:
         conn.close()
+
+
+def _length_limits(conn: pymysql.connections.Connection, table_name: str) -> dict[str, int]:
+    """Return {column: max characters} of a table from the live information_schema.
+
+    Reading the limits from MySQL (rather than hard-coding them) keeps the guard
+    automatically in sync with the deployed DDL. Only character columns have a
+    ``CHARACTER_MAXIMUM_LENGTH``; BINARY/BIGINT/DATETIME columns are absent.
+    """
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+            "AND CHARACTER_MAXIMUM_LENGTH IS NOT NULL",
+            (table_name,),
+        )
+        return {name: int(limit) for name, limit in cursor.fetchall()}
+    finally:
+        cursor.close()
+
+
+def _validate_cell_lengths(
+    rows, base_row_number: int, spec: TableSpec, limits: dict[str, int]
+) -> None:
+    """Reject any raw cell wider than its column before it reaches MySQL.
+
+    ``INSERT IGNORE`` ignores ``STRICT_TRANS_TABLES``, so MySQL would silently
+    truncate an over-long cell down to the column width. This check runs before
+    the chunk is sent, so an offending row fails the batch (``ColumnTooLongError``)
+    and the ``error_summary`` records the exact source row and column instead of
+    the data being silently discarded.
+    """
+    for offset, fields in enumerate(rows):
+        row_number = base_row_number + offset
+        for column, value in zip(spec.raw_columns, fields, strict=True):
+            limit = limits.get(column)
+            if limit is not None and len(value) > limit:
+                raise ColumnTooLongError(
+                    f"row {row_number}, column '{column}': value length "
+                    f"{len(value)} > column width {limit} characters"
+                )
 
 
 def _suffix(rows, skip_rows: int, start_row_number: int) -> tuple[int, tuple[tuple[str, ...], ...]]:

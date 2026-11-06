@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from ecommerce_dw.ingestion.chunk import CsvChunkReader
 from ecommerce_dw.ingestion.keys import make_row_key
-from ecommerce_dw.ingestion.loader import _params_for, _suffix, build_insert_sql
+from ecommerce_dw.ingestion.loader import (
+    ColumnTooLongError,
+    _params_for,
+    _suffix,
+    _validate_cell_lengths,
+    build_insert_sql,
+)
 from ecommerce_dw.ingestion.specs import TABLE_SPECS
 
 _AT = datetime(2026, 11, 6, 12, 0, 0, tzinfo=UTC).replace(tzinfo=None)
@@ -52,6 +60,24 @@ def test_suffix_handles_full_partial_and_surplus_skips():
     base, rest = _suffix(rows, 7, 10)
     assert base == 13
     assert rest == ()
+
+
+def test_validate_cell_lengths_accepts_within_limit_rows_and_locates_overlong_cell():
+    limits = {
+        "timestamp": 64,
+        "visitorid": 64,
+        "event": 32,
+        "itemid": 64,
+        "transactionid": 64,
+    }
+    # Exact-width values are fine, and so is a value that just fits the limit.
+    ok = (("1", "2", "v" * 32, "3", ""), ("4", "5", "x" * 31, "6", "7"))
+    _validate_cell_lengths(ok, 2, _EVENTS, limits)  # must not raise
+
+    # The 300-char `event` sits in the second row => source_row_number = 2 + 1.
+    bad = (("1", "2", "view", "3", ""), ("9", "9", "v" * 300, "9", ""))
+    with pytest.raises(ColumnTooLongError, match=r"row 3, column 'event'.*300 > .*32 characters"):
+        _validate_cell_lengths(bad, 2, _EVENTS, limits)
 
 
 def test_params_for_assigns_deterministic_row_keys_and_numbers():
