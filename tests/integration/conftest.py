@@ -9,7 +9,7 @@ production ``ecommerce_dw`` database. The session fixture ``mysql_testdb``:
    loudly, not fall back to it;
 2. **provisions**: connects as ``root`` (password from ``MYSQL_ROOT_PASSWORD``),
    drops + recreates the schema, and grants the app user full rights on it;
-3. **applies** the ODS + DWD DDL to the fresh schema;
+3. **applies** the ODS + DWD + DWS + ADS DDL to the fresh schema;
 4. yields the ``DbConfig`` and **drops the schema** afterwards.
 
 If the schema cannot be created/reached, the whole integration module is
@@ -32,7 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 _MYSQL_BASE_DEFAULTS = {"PORT": "3306", "USER": "ecom_app", "DATABASE": ""}
 
-# Files that belong to the ODS layer (DWD files come from the DWD DDL dir).
+# Files that belong to the ODS layer (DWD/DWS/ADS files come from their own globs).
 _ODS_DDL_FILES = (
     "ods_etl_batch_log.sql",
     "ods_events_raw.sql",
@@ -72,9 +72,14 @@ def _admin_config(cfg: DbConfig) -> DbConfig:
 
 
 def _apply_schema(cfg: DbConfig) -> None:
-    """Create the ODS + DWD tables in the test schema (CREATE IF NOT EXISTS)."""
+    """Create the ODS + DWD + DWS + ADS tables in the test schema (IF NOT EXISTS)."""
     ddl_dir = PROJECT_ROOT / "sql" / "ddl"
-    files = [ddl_dir / name for name in _ODS_DDL_FILES] + sorted(ddl_dir.glob("dwd_*.sql"))
+    files = (
+        [ddl_dir / name for name in _ODS_DDL_FILES]
+        + sorted(ddl_dir.glob("dwd_*.sql"))
+        + sorted(ddl_dir.glob("dws_*.sql"))
+        + sorted(ddl_dir.glob("ads_*.sql"))
+    )
     conn = pymysql.connect(
         host=cfg.host,
         port=cfg.port,
