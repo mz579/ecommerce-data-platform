@@ -274,10 +274,15 @@ ecommerce-postgres            Up (healthy)              postgres:16.13
 
 ```text
 $ airflow dags list
-dag_id                   | fileloc                                        | owners  | is_paused
+dag_id                   | fileloc                                       | owners  | is_paused
+=========================+===============================================+=========+==========
 ecommerce_daily_pipeline | /opt/airflow/dags/ecommerce_daily_pipeline.py | dataeng | False
 phase6_retry_demo        | /opt/airflow/dags/phase6_retry_demo.py        | dataeng | True
 ```
+
+演示 DAG **刻意保持 `is_paused=True`**（`schedule=None`、纯手动演示用途，库内实况
+一致）；需要跑重试演示时临时 `airflow dags unpause phase6_retry_demo`，跑完再
+`airflow dags pause phase6_retry_demo` 复位（§9.5 即按此流程执行）。
 
 meta 库 `dag` 表实测（调度证据）：
 
@@ -370,9 +375,13 @@ finished_at=22:53:15`。
 
 ### 9.5 重试演示（`phase6_retry_demo`，不触碰生产数据）
 
+演示 DAG 默认暂停，先临时解除暂停再触发，跑完恢复（见 §9.2 说明）：
+
 ```bash
+docker compose exec airflow-scheduler airflow dags unpause phase6_retry_demo
 docker compose exec airflow-scheduler airflow dags trigger phase6_retry_demo \
   --conf '{"fail_first_tries": 1, "lag_seconds": 2}'
+docker compose exec airflow-scheduler airflow dags pause phase6_retry_demo
 ```
 
 任务 `flaky_but_eventually_succeeds`（`retries=2`, `retry_delay=5s`,

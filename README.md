@@ -318,8 +318,8 @@ ecommerce-data-platform/
   `verify` ALL MATCH，见 `docs/dws_ads_design.md` §8）；Phase 5 增量与 60 条质量门禁
   实测通过（见 `docs/incremental_and_quality.md` §9，含崩溃恢复实证）；下次启动前先
   `docker compose up -d` 并等待 MySQL 健康。
-- `docs/architecture.md` 中包含完整 Roadmap；下一阶段为「Phase 6：Airflow 编排」，
-  读取目标为 ADS 层输出 + DWD 明细。
+- `docs/architecture.md` 中包含完整 Roadmap；下一阶段为「Phase 7：Superset 看板」
+  （Superset 只读 ADS 层输出 / 受控视图，不直接读取 DWD 明细）。
 
 ## 安全说明
 
