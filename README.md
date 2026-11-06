@@ -2,16 +2,28 @@
 
 电商用户行为数据仓库与实时分析平台。
 
-**Phase 1（本阶段）**：数据探索与数据契约——全量流式统计、字段画像、指标口径与数据契约。
-尚未实现 ETL、数仓建模、Airflow 编排、Superset 看板或实时链路。
+**阶段进度：Phase 1（数据探索与契约）、Phase 2（ODS 贴源入库）、Phase 3（DWD 明细标准化）已完成**（见「当前状态」）。尚未实现 DWS 汇总/ADS 应用、Airflow 编排、Superset 看板或实时链路。
 
 目标形态（后续 Phase）：Retailrocket 用户行为数据 → MySQL 四层数仓（ODS / DWD / DWS / ADS）→ Airflow 编排 → Superset 看板；之后扩展 Kafka + Flink 实时链路。
 
 ## 当前状态
 
-- **Phase 1 已完成**：全量数据探索（4 个 CSV，约 1GB）结论见
+- **Phase 1 ✅ 已完成**：全量数据探索（4 个 CSV，约 1GB）结论见
   `notebooks/01_eda.ipynb`（已实际执行）；字段/指标口径/数据契约分别沉淀在
   `docs/data_dictionary.md`、`docs/metric_definitions.md`、`docs/data_contract.md`。
+- **Phase 2 ✅ 已完成**：ODS 贴源入库——`ods_events_raw` 2,756,101 行、
+  `ods_item_properties_raw` 20,275,902 行、`ods_category_tree_raw` 1,669 行；
+  分块幂等装载器（断点续跑）+ `etl_batch_log` 批次审计。设计见 `docs/ods_design.md`，
+  代码在 `src/ecommerce_dw/ingestion/`。
+- **Phase 3 ✅ 已完成**：DWD 明细标准化——**纯函数转换 + SQL 精确去重 + 异常隔离**
+  把 ODS 事件转成标准明细：`dwd_events`（标准明细）+ `dwd_events_duplicate`
+  （业务键去重掉的精确重复行）+ `dwd_events_reject`（异常隔离），恒等式
+  `ODS = DWD + dup + reject` 每次构建强制校验；支持 FULL / DATES 幂等重建、断点续跑、
+  构建审计 `dwd_build_log`。设计见 `docs/dwd_design.md`（事件类型以主方案 §2.2 标准
+  枚举 `{view, add_to_cart, transaction}` 为准），代码在 `src/ecommerce_dw/dwd/`。
+  *全量构建执行到 98% 时被运行环境内存回收中断，stage 已保留、可原地续跑，行级
+  实测见 `docs/dwd_design.md` §9（`ods=2,756,101`；预期 `ok=2,755,641 / dup=460 /
+  reject=0`，最终证值以续跑后 LOADED 为准）。*
 - 可复用流式统计模块在 `src/ecommerce_dw/eda/`（无数据库、只读本地 CSV）。
 - 工程骨架 + 两个数据库的容器编排文件（`docker-compose.yml`）。
 - 容器运行时为 **WSL2 内的 Docker Engine**（Windows 侧无 `docker` 命令，见「已验证环境」）；MySQL / PostgreSQL 容器已实际启动并通过健康检查。
@@ -71,13 +83,29 @@ ruff format --check .
 pytest
 ```
 
-## Phase 1 产物快速入口
+## 产物快速入口
+
+### Phase 1 探索与契约
 
 - **EDA notebook**：`notebooks/01_eda.ipynb`（已执行含图表，可 Restart & Run All 复现；
   重新生成 cell 用 `python scripts/build_eda_notebook.py`）。
 - **流式统计模块**：`src/ecommerce_dw/eda/`——`scan_csv` 通用画像、
   `summarize_events` / `summarize_item_properties` / `summarize_category_tree` 专项统计。
 - **口径文档**：`docs/data_dictionary.md`、`docs/metric_definitions.md`、`docs/data_contract.md`。
+
+### Phase 2 ODS 入库
+
+- **装载器**：`src/ecommerce_dw/ingestion/`（分块幂等、断点续跑、批次审计）。
+- **运行**：`python -m ecommerce_dw.ingestion.cli load <file> <table>`（详见 `docs/ods_design.md`）。
+- **DDL**：`scripts/apply_ods_ddl.py` 只应用 ODS 层 `sql/ddl/ods_*.sql`。
+
+### Phase 3 DWD 明细标准化
+
+- **设计文档**：`docs/dwd_design.md`（字段/粒度/转换规则/去重决定/重建语义/测量结果）。
+- **构建**：`python -m ecommerce_dw.dwd.cli build [--dates ...] [--force]`
+  （全量 / 按 UTC 日重建；另提供 `verify` / `status` / `cleanup` 子命令）。
+- **DDL**：`scripts/apply_dwd_ddl.py` 应用 `sql/ddl/dwd_*.sql`（5 张表）。
+- **转换核心**：`src/ecommerce_dw/dwd/transform.py`（纯函数，`TRANSFORM_VERSION="1"`）。
 
 ## Docker（数据库）启停
 
@@ -158,8 +186,11 @@ python scripts/check_db_health.py
 ecommerce-data-platform/
 ├─ config/                # 配置文件模板（不含凭据）
 ├─ data/{raw,staging,sample}/   # 数据目录（数据文件不入库、不提交）
-├─ scripts/               # 运维脚本（如 check_db_health.py）
-├─ src/ecommerce_dw/      # 项目 Python 包（Phase 0 仅配置解析模块）
+├─ scripts/               # 运维脚本（check_db_health、apply_*_ddl 等）
+├─ src/ecommerce_dw/      # 项目 Python 包（eda 探索 / config 配置）
+│  ├─ eda/                # Phase 1：无库流式统计
+│  ├─ ingestion/          # Phase 2：ODS 分块幂等装载
+│  └─ dwd/                # Phase 3：DWD 构建（transform / builder / cli）
 ├─ sql/{ddl,dml,checks}/  # 数仓建模 SQL（后续 Phase 使用）
 ├─ airflow/dags/          # Airflow DAG（后续 Phase）
 ├─ streaming/             # Kafka + Flink 实时链路（后续 Phase）
@@ -177,7 +208,10 @@ ecommerce-data-platform/
 
 - 容器运行时已就绪且 Phase 0 容器相关交付物已实测通过（WSL2 内 Docker Engine，
   见「已验证环境」）；若日后迁到 Docker Desktop 或 CI 环境，以「已验证环境」为基线重新核对。
-- `docs/architecture.md` 中包含完整 Roadmap；下一阶段从「Phase 2：ODS 入库与数据批次」开始。
+- Phase 3 DWD 全量构建在 WSL 里的 MySQL 上实测通过（行数恒等式成立，见
+  `docs/dwd_design.md` §9）；下次启动前先 `docker compose up -d` 并等待 MySQL 健康。
+- `docs/architecture.md` 中包含完整 Roadmap；下一阶段为「Phase 4：DWS 维度建模与
+  指标汇总聚合」，读取目标为 `dwd_events`（去重后标准明细）。
 
 ## 安全说明
 
