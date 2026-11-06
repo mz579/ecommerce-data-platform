@@ -39,6 +39,10 @@ DATA_DIR = PROJECT_ROOT / "data" / "raw" / "retailrocket"
 # enough headroom so a single file survives many container restarts.
 MAX_RESUMES = 100
 RESUME_WAIT_SECONDS = 600
+# MySQL can be down for minutes at a time on this dev box, so a file's whole
+# pipeline (cleanup -> load -> reconcile) is re-attempted until it completes.
+FILE_PIPELINE_RETRIES = 20
+_WAIT_READY_TIMEOUT = 900
 
 SOURCES = (
     "category_tree.csv",
@@ -84,15 +88,21 @@ def count_db_rows(cfg, table: str, source_file: str) -> int:
         conn.close()
 
 
-def _cleanup_incomplete(cfg, source_file: str) -> None:
+def _cleanup_incomplete(cfg, source_file: str) -> bool:
     """Mark stale PENDING/FAILED batches clean so a fresh load can start.
 
     A batch left PENDING/FAILED was interrupted by an unlucky crash between
     chunks; its committed rows carry the ``ingest_batch_id`` of that dead batch
     and would corrupt a fresh run's reconciliation, so wipe them first. LOADED
     batches are left untouched (the loader skips those by SHA-256).
+
+    Returns False when MySQL is unreachable (caller retries the pipeline).
     """
-    conn = connect(cfg)
+    conn = None
+    try:
+        conn = connect(cfg, connect_timeout=5)
+    except pymysql.err.OperationalError:
+        return False
     try:
         entries = BatchLogRepo(conn).find_for_file(source_file)
     finally:
@@ -104,6 +114,7 @@ def _cleanup_incomplete(cfg, source_file: str) -> None:
             f"   cleaned stale {entry.status} batch #{entry.batch_id} "
             f"({removed:,} rows) for {source_file}"
         )
+    return True
 
 
 def _wait_ready(cfg, timeout: int = 60) -> None:
@@ -132,50 +143,69 @@ def main() -> int:
         table = infer_table_for_file(name) or "?"
         expected = count_source_rows(path)
         print(f"\n== loading {name} -> {table} (source data rows: {expected:,})")
-        _wait_ready(cfg)
-        _cleanup_incomplete(cfg, name)
-        try:
-            result = loader.load_csv(
-                cfg,
-                path,
-                table,
-                max_resumes=MAX_RESUMES,
-                resume_wait_seconds=RESUME_WAIT_SECONDS,
-            )
-        except loader.BatchStateError as exc:
-            print(f"   BLOCKED: {exc}")
-            errors.append(str(exc))
-            continue
-        except loader.LoadError as exc:
-            print(f"   FAILED: {exc}")
-            errors.append(str(exc))
-            continue
-        if result.skipped:
-            print(f"   skipped: already loaded as batch #{result.batch_id}")
-        else:
+        result = None
+        actual = None
+        ok = False
+        for attempt in range(1, FILE_PIPELINE_RETRIES + 1):
+            try:
+                if not _cleanup_incomplete(cfg, name):
+                    raise pymysql.err.OperationalError(0, "mysql not reachable")
+                result = loader.load_csv(
+                    cfg,
+                    path,
+                    table,
+                    max_resumes=MAX_RESUMES,
+                    resume_wait_seconds=RESUME_WAIT_SECONDS,
+                )
+                if not result.skipped:
+                    actual = count_db_rows(cfg, table, name)
+                    ok = actual == expected
+                    print(
+                        f"   reconcile: DB={actual:,} vs source={expected:,} "
+                        f"-> {'OK' if ok else 'MISMATCH'}"
+                    )
+                else:
+                    print(f"   skipped: already loaded as batch #{result.batch_id}")
+                    ok = True
+                break
+            except pymysql.err.OperationalError as exc:
+                if attempt >= FILE_PIPELINE_RETRIES:
+                    errors.append(f"{name}: MySQL unreachable after {attempt} attempts: {exc}")
+                    continue
+                print(f"   DB hiccup (attempt {attempt}/{FILE_PIPELINE_RETRIES}): {exc}; retrying")
+                _wait_ready(cfg, _WAIT_READY_TIMEOUT)
+            except loader.BatchStateError as exc:
+                print(f"   BLOCKED: {exc}")
+                errors.append(str(exc))
+                break
+            except loader.LoadError as exc:
+                print(f"   FAILED: {exc}")
+                errors.append(str(exc))
+                break
+        if result is not None and not result.skipped:
             print(
                 f"   loaded: batch #{result.batch_id}, rows={result.rows_committed:,}, "
                 f"duration={result.duration_seconds:.2f}s"
             )
-        _wait_ready(cfg)
-        actual = count_db_rows(cfg, table, name)
-        ok = actual == expected
-        print(f"   reconcile: DB={actual:,} vs source={expected:,} -> {'OK' if ok else 'MISMATCH'}")
         summary.append((name, expected, actual, ok))
-        if not ok:
+        if actual is not None and not ok:
             errors.append(f"{name}: DB={actual:,} but source has {expected:,}")
 
-    conn = connect(cfg)
-    try:
-        batches = BatchLogRepo(conn).list_recent(limit=20)
-    finally:
-        conn.close()
     print("\n== recent batches ==")
-    for e in batches:
-        print(
-            f"   #{e.batch_id} {e.status:<8} rows={e.row_count:>12,} "
-            f"{e.source_file} -> {e.table_name}"
-        )
+    try:
+        _wait_ready(cfg, 300)
+        conn = connect(cfg, connect_timeout=5)
+        try:
+            batches = BatchLogRepo(conn).list_recent(limit=20)
+        finally:
+            conn.close()
+        for e in batches:
+            print(
+                f"   #{e.batch_id} {e.status:<8} rows={e.row_count:>12,} "
+                f"{e.source_file} -> {e.table_name}"
+            )
+    except pymysql.err.OperationalError:
+        print("   (MySQL unreachable right now; batch list omitted)")
 
     print("\n== reconciliation ==")
     for name, expected, actual, ok in summary:
