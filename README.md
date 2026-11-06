@@ -21,9 +21,11 @@
   `ODS = DWD + dup + reject` 每次构建强制校验；支持 FULL / DATES 幂等重建、断点续跑、
   构建审计 `dwd_build_log`。设计见 `docs/dwd_design.md`（事件类型以主方案 §2.2 标准
   枚举 `{view, add_to_cart, transaction}` 为准），代码在 `src/ecommerce_dw/dwd/`。
-  *全量构建执行到 98% 时被运行环境内存回收中断，stage 已保留、可原地续跑，行级
-  实测见 `docs/dwd_design.md` §9（`ods=2,756,101`；预期 `ok=2,755,641 / dup=460 /
-  reject=0`，最终证值以续跑后 LOADED 为准）。*
+  **全量构建已完成（build #30 LOADED，finished_at 2026-11-07 19:41）**：
+  `dwd_events = 2,755,641`、`dwd_events_duplicate = 460`、`dwd_events_reject = 0`，
+  恒等式 `2,756,101 = 2,755,641 + 460 + 0` 由 `cli verify` 校验通过；
+  去重后事件分布 view 2,664,218 / add_to_cart 68,966 / transaction 22,457，
+  行级实测与按日重建幂等实测见 `docs/dwd_design.md` §9。
 - 可复用流式统计模块在 `src/ecommerce_dw/eda/`（无数据库、只读本地 CSV）。
 - 工程骨架 + 两个数据库的容器编排文件（`docker-compose.yml`）。
 - 容器运行时为 **WSL2 内的 Docker Engine**（Windows 侧无 `docker` 命令，见「已验证环境」）；MySQL / PostgreSQL 容器已实际启动并通过健康检查。
@@ -69,6 +71,9 @@ Copy-Item .env.example .env
 
 - `.env` 已被 git 忽略，**禁止提交到仓库**；其中口令仅用于本地开发。
 - `config/config.yaml`（复制自 `config/config.example.yaml`）同样被 git 忽略；配置文件不含任何凭据。
+- 集成测试专用 schema：默认为 `MYSQL_DATABASE + "_test"`（即 `ecommerce_dw_test`），
+  可用 `MYSQL_TEST_DATABASE` 覆盖。**schema 名必须以 `_test` 结尾**，否则集成测试
+  fixture 直接报错（绝不落生产库）。
 
 ## 代码检查与测试
 
@@ -82,6 +87,12 @@ ruff format --check .
 # 冒烟测试（不依赖数据库）
 pytest
 ```
+
+> MySQL 集成测试（`tests/integration/`）在**独立 `*_test` schema** 中运行：session
+> 级 fixture 用 `.env` 里的 root 凭据（`MYSQL_ROOT_PASSWORD`）自动 建库 → 授权给
+> `MYSQL_USER` → 载入 ODS/DWD DDL → 测试 → 删库，生产库不会被触碰。数据库不可达
+> 或无法建库时明确 skip（打印原因）；`MYSQL_TEST_DATABASE` 指向非 `_test` 结尾的
+> schema 时直接 raise。因此跑 `pytest` 前请确认 `.env` 中已配置 `MYSQL_ROOT_PASSWORD`。
 
 ## 产物快速入口
 

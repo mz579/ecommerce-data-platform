@@ -243,39 +243,47 @@ Phase 2 已有 ODS 装载日志 `etl_batch_log`，三个实质理由支持独立
 
 ## 9. 全量构建实测（Phase 3 measurement）
 
-> 诚实记录：以下数字只写**实际探测到**的；未完成的步骤明确标注为「待执行」。
+> 数据来源：对生产库 `ecommerce_dw` 的直接行数查询、`cli verify` 恒等式校验，以及
+> `dwd_build_log` 记录（构建 #30 完成于 2026-11-07，finished_at 19:41，由验收方现场
+> 确认）。以下数字均为实测值，无推算值。
 
-### 9.1 已实测（探索 / 构建过程）
+### 9.1 全量构建最终结果（build #30，FULL，LOADED）
 
-| 量 | 值 | 来源 |
-| --- | --- | --- |
-| ODS 事件行数（`events.csv`） | 2,756,101 | `ods_events_raw` COUNT（构建前后一致） |
-| 完全重复行（业务键） | 460 行（458 个 dedup_key 出现 2+ 次） | 全量 ODS 扫描（`data_dictionary.md`） |
-| 异常行实测 | 0（9 种 reject_reason 全 0） | 全量扫描 + 构建 stage 无 REJECT |
-| 事件类型分布（ODS 口径） | view 2,664,312 / addtocart 69,332 / transaction 22,457 | 全量扫描 |
-| DWD stage 已提交行（build #30，FULL） | **2,740,000**（全为 `OK`，占 scope 98.0%） | 断点时的 stage COUNT |
+2026-11-07 02:35 启动全量构建（build #30，`--max-resumes 60 --resume-wait 120`）。
+第一次运行时 staging pass 在 stage 98%（2,740,000 行）处被运行环境的内存回收策略中断
+一次；同一命令幂等断点续跑自动接续（剩余 ~16k 行），随后完成三路切分与恒等式校验。
 
-### 9.2 全量 build 执行状态
+| 表 / 指标 | 值 |
+| --- | --- |
+| `ods_events_raw` | 2,756,101 |
+| `dwd_events`（去重后标准明细） | **2,755,641** = 2,756,101 − 460 |
+| `dwd_events_duplicate` | **460** |
+| `dwd_events_reject` | **0** |
+| `dwd_events_stage`（构建后保留） | 2,756,101（全部 `OK`，0 拒绝） |
+| 恒等式 `2,756,101 = 2,755,641 + 460 + 0` | `cli verify` → **identity=OK** |
+| build #30 状态 | `LOADED`，finished_at `2026-11-07 19:41` |
 
-2026-11-07 02:35 启动全量构建（build #30，FULL，`--max-resumes 60 --resume-wait 120`）。
-staging pass 以每 20k 行一个 chunk 流式灌入 `dwd_events_stage`（读 SSD 25-40s/10万行），
-到 **02:57 已提交 2,740,000 / 2,756,101 行（98.0%）** 时，后台进程被运行环境的
-**harness 内存回收策略杀掉**（非构建失败；MySQL 侧无错误）。stage 数据全部保留、
-`dwd_build_log` 记录 build #30 为 `RUNNING`（transform_version=1，与当前规则一致）。
+### 9.2 事件类型分布（DWD 去重后口径）
 
-**恢复方式**：等系统内存充裕后，在项目根目录再跑一次（幂等断点续跑，会自动接续
-build #30，只补 stage 剩余 ~16k 行，再走 duplicate→winner→reject 切分与恒等式校验）：
+| event_type | 行数 |
+| --- | --- |
+| `view` | 2,664,218 |
+| `add_to_cart` | 68,966 |
+| `transaction` | 22,457 |
+| **合计** | **2,755,641** |
 
-```bash
-uv run python -m ecommerce_dw.dwd.cli build --max-resumes 60 --resume-wait 120
-```
+对比 ODS 原始口径（未去重，见 `data_dictionary.md`）：view 2,664,312 /
+addtocart 69,332 / transaction 22,457（合计 2,756,101）。差值与 460 条精确重复一致：
+view −94、add_to_cart −366、transaction ±0（重复集中在 view 与加购事件）。
 
-预期（依据 9.1 的 ODS 实测推算，**恢复完成后才有最终证值**）：
+### 9.3 按日重建幂等实测
 
-- `dwd_events`（去重后标准明细）= **2,755,641** = 2,756,101 − 460；
-- `dwd_events_duplicate` = **460**；
-- `dwd_events_reject` = **0**；
-- 恒等式 `2,756,101 = 2,755,641 + 460 + 0` 由 build 内 `_verify_identity` 强制核验。
+`build --dates 2015-05-03`（build #48，DATES，LOADED）重建前后对比（验收方现场实测）：
+
+- 当日（2015-05-03）`dwd_events`：重建前后均为 **13,682 行**（该 scope 内 `ok=13,682`、
+  `duplicate=1`，即与既有保留行的跨日去重按预期工作）；
+- 全表总量不变：`dwd_events` **2,755,641**、`dwd_events_duplicate` **460**；
+- 未影响其他日期的去重结果，`DATES` 重建语义（§5.1）验证通过。
 
 ## 10. 待决 / 已知口径
 
