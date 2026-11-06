@@ -1,0 +1,20 @@
+# Phase 0 最小日志配置（标准库 logging.dictConfig 可解析）
+# 后续 Phase 各模块统一引用，保证日志格式一致。
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  simple:
+    format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: INFO
+    formatter: simple
+    stream: ext://sys.stdout
+
+root:
+  level: INFO
+  handlers:
+    - console

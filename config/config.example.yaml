@@ -1,0 +1,19 @@
+# Phase 0 最小配置示例
+# 使用方法：复制为 config/config.yaml 后按需修改（config/config.yaml 已被 .gitignore 忽略，不会提交）。
+# 注意：本文件不含任何敏感信息；数据库口令一律通过环境变量（.env）注入，绝不写进配置文件。
+
+app:
+  name: ecommerce-data-platform
+  phase: 0
+  version: 0.1.0
+
+data:
+  # 原始数据放这里（相对项目根目录的约定，而非绝对路径）
+  raw_dir: data/raw
+  staging_dir: data/staging
+  sample_dir: data/sample
+
+# 环境变量前缀约定：scripts/check_db_health.py 等脚本据此读取连接信息
+env_prefix:
+  mysql: MYSQL
+  postgres: POSTGRES

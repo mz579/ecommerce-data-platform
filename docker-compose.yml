@@ -1,0 +1,75 @@
+# ==================================================================
+# ecommerce-data-platform — Phase 0
+#
+# 只启动两个数据库实例：
+#   - mysql   ：业务数仓（后续 ODS/DWD/DWS/ADS 四层建模全在这里）
+#   - postgres：Airflow / Superset 元数据库（与业务数仓严格分离）
+#
+# 以后接入 Airflow / Superset / Kafka / Flink 属于后续 Phase，本阶段不配置。
+#
+# 镜像 tag 说明：禁止使用 :latest。下面锁定的补丁 tag 在首次 pull 前
+# 必须实际核实存在（参考 https://hub.docker.com/v2/repositories/library/mysql/tags/<tag> ）；
+# 若不存在，请换成同分支（8.0.x / 16.x）最近可用 tag，
+# 并同步更新 docs/architecture.md 的版本决策一节。
+#
+# 所有口令通过 .env 注入（.env 已被 git 忽略，禁止提交）。
+# 启动：docker compose up -d      停止：docker compose down
+# ==================================================================
+
+name: ecommerce-data-platform
+
+services:
+  mysql:
+    image: mysql:8.0.43
+    container_name: ecommerce-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 数据卷为空时，镜像首次启动自动执行初始化脚本（建库 + utf8mb4 字符集）
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - ecommerce-net
+
+  postgres:
+    image: postgres:16.13
+    container_name: ecommerce-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: Asia/Shanghai
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - ecommerce-net
+
+volumes:
+  mysql_data:
+  postgres_data:
+
+networks:
+  ecommerce-net:
+    driver: bridge
