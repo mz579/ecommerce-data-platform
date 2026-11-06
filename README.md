@@ -30,11 +30,14 @@ uv venv --python 3.11 .venv
 # 2. 激活虚拟环境（每次新开终端都要执行一次）
 .\.venv\Scripts\Activate.ps1
 
-# 3. 安装项目依赖（运行时 + dev）
-uv pip install -e ".[dev]"
+# 3. 安装项目依赖（运行时 + dev，版本由 uv.lock 锁定）
+uv sync --all-extras
 ```
 
 > 若 PowerShell 拒绝执行激活脚本：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
+>
+> 依赖版本由 `uv.lock`（随仓库提交）锁定，换机器可复现。升级依赖用
+> `uv lock --upgrade` 后重新 `uv sync`；lock 文件必须随代码一起提交，不要手工改动。
 
 ## 配置
 
@@ -92,6 +95,8 @@ docker compose down -v
 python scripts/check_db_health.py
 ```
 
+> Windows 终端若中文输出乱码，先执行 `chcp 65001`，或运行前设置 `$env:PYTHONUTF8=1`。
+
 任一失败退出码非 0。也可以直接用客户端连接：
 
 | 服务 | Host | Port | 库 | 用户 |
@@ -125,7 +130,7 @@ ecommerce-data-platform/
 ## 已知限制与下一步
 
 - Docker Desktop / WSL2 未安装（`docker` 命令不存在），Phase 0 **未**对容器做任何实际验证；安装 Docker 后若 compose 配置有问题，会在首次启动时修正。
-- `docs/architecture.md` 中包含完整 Roadmap；下一阶段从「Phase 1：ODS 层数据导入」开始。
+- `docs/architecture.md` 中包含完整 Roadmap；下一阶段从「Phase 1：数据探索与数据契约」开始。
 
 ## 安全说明
 

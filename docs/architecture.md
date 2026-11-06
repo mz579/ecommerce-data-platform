@@ -75,13 +75,18 @@ Airflow / Superset 的非业务状态（DAG 运行记录、看板定义等）存
 - 元数据库用 PostgreSQL：Airflow 官方支持与默认偏好的元数据库，
   Superset 同样原生支持；用其官方镜像可避开兼容性坑。
 
-## 7. Roadmap（后续 Phase 计划）
+## 7. Roadmap（后续 Phase 计划，编号与主方案一致）
 
-- **Phase 1**：ODS 层导入 —— Retailrocket 数据下载 / 预处理 → MySQL ODS。
-- **Phase 2**：DWD 清洗清洗转换；DWS / ADS 聚合建模；`sql/{ddl,dml,checks}` 落地。
-- **Phase 3**：Airflow 编排与 DAG 开发（依赖 PostgreSQL 元数据库）。
-- **Phase 4**：Superset 看板 + 数据质量检查。
-- **Phase 5**（扩展）：Kafka + Flink 实时链路，`streaming/` 目录落地。
+- **Phase 1**：数据探索与数据契约 —— EDA、字段梳理、指标口径初稿。
+- **Phase 2**：ODS 入库与数据批次 —— Retailrocket 数据下载 / 预处理 → MySQL ODS。
+- **Phase 3**：DWD 明细标准化 —— 清洗与明细事实层建模。
+- **Phase 4**：DWS / ADS 建模 —— 汇总层与展示层建模；`sql/{ddl,dml,checks}` 落地。
+- **Phase 5**：增量处理与质量门禁。
+- **Phase 6**：Airflow 编排与 DAG 开发（依赖 PostgreSQL 元数据库）。
+- **Phase 7**：Superset 看板。
+- **Phase 8**：测试、性能与交付（V1.0）。
+- **Phase 9**：Kafka + Flink 实时扩展（`streaming/` 目录落地）。
+- **Phase 10**：Spark 批处理（可选）。
 
 ## 8. Phase 0 交付物与验证状态
 
