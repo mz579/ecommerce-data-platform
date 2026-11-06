@@ -139,8 +139,9 @@ print(f"未知事件类型        {ev.unknown_events or '无'}")
 print(f"时间范围            {utc(ev.ts_min_ms)}  ~  {utc(ev.ts_max_ms)}")
 print(f"非法/缺失时间戳     {ev.n_invalid_ts}")
 print(
-    f"去重 visitorid      {ev.n_visitors:,}"
-    f"（visitorid='0' 哨兵 {ev.n_visitor_zero} 行 / 缺失 {ev.n_missing_visitor} 行）"
+    f"任意行为去重 visitorid {ev.n_visitors:,}"
+    f"（visitorid='0' 哨兵 {ev.n_visitor_zero} 行 / 缺失 {ev.n_missing_visitor} 行；"
+    "view 口径 UV=1,404,178，见 docs/metric_definitions.md §2）"
 )
 print(f"去重 itemid         {ev.n_items:,}（缺失 {ev.n_missing_item} 行）")
 print(
@@ -304,7 +305,7 @@ plt.show()
 | 主题 | 实测结论 |
 | --- | --- |
 | 事件规模 | 2,756,101 行：view 2,664,312（96.7%）/ addtocart 69,332 / transaction 22,457；无未知类型 |
-| 访客 / 商品 | 去重访客 1,407,580（含 3 个 `visitorid='0'` 哨兵）；去重商品 235,061 |
+| 访客 / 商品 | 任意行为去重访客 1,407,580（含 3 个 `visitorid='0'` 哨兵；`view` 口径 UV = 1,404,178，见 `docs/metric_definitions.md`）；去重商品 235,061 |
 | 成交标识 | transactionid 为**订单级**：17,672 去重 ID 对应 22,457 笔交易事件（2,710 个 ID 复用）；行数 ≠ 订单数 |
 | 商品属性 | 20,275,902 行、417,053 商品、1,104 种属性名（多数为数字编码）；无缺失、无完全重复行 |
 | 类目树 | 1,669 节点 / 25 根 / 最大深度 5 / 无孤儿 / 无环（良构森林） |
