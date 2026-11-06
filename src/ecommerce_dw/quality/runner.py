@@ -250,6 +250,11 @@ def publish_ads_scope(
         _ensure_control_tables(conn)
         run_id = quality_run_id
         if run_id is None:
+            logger.info(
+                "publish: no --run given - running a fresh FULL quality gate "
+                "(full-scan of ODS/DWD/DWS/ADS, expect a few minutes) before writing"
+                " ads_publish_log..."
+            )
             report = run_quality_gate(cfg, dates=dates, catalog=catalog)
             run_id = report.run_id
         else:

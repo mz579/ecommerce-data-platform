@@ -287,7 +287,7 @@ def test_quality_gate_and_incremental_end_to_end(cfg, tmp_path, tracked):
     report = run_quality_gate(cfg, catalog=_CATALOG)
     assert report.ok
     assert report.failed == 0
-    assert report.rules_total == len(_CATALOG) == 59
+    assert report.rules_total == len(_CATALOG) == 60
     runs = list_runs(cfg)
     assert runs and runs[0].run_id == report.run_id and runs[0].status == "PASS"
     results = list_run_results(cfg, report.run_id)

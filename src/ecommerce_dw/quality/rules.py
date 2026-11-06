@@ -777,6 +777,32 @@ def build_rule_catalog(
             date_column="event_date_utc",
         )
     )
+    rules.append(
+        SqlCountRule(
+            key="ads_funnel_conv_global_users_eq_dwd",
+            category="reconciliation",
+            description=(
+                "ads_funnel_daily.conv_global_users equals the DISTINCT transaction "
+                "visitor count per day in dwd_events (visitor_id IS NOT NULL) - an "
+                "independent DWD-side check, not derived from the DWS build"
+            ),
+            date_filter_repeats=2,
+            sql="""
+                SELECT COUNT(*) AS total,
+                       SUM(f.metric_value <> g.cnt) AS bad
+                FROM ads_funnel_daily f
+                JOIN (
+                    SELECT event_date_utc AS day_utc, COUNT(DISTINCT visitor_id) AS cnt
+                    FROM dwd_events
+                    WHERE event_type = 'transaction' AND visitor_id IS NOT NULL{date_filter}
+                    GROUP BY event_date_utc
+                ) g ON g.day_utc = f.event_date_utc
+                WHERE f.metric_name = 'conv_global_users'
+                  AND 1 = 1{date_filter}
+            """,
+            date_column="event_date_utc",
+        )
+    )
     for key, metric, numerator in (
         ("add_to_cart_rate", "add_to_cart_rate", "add_to_cart_cnt > 0"),
         ("conv_strict_rate", "conv_strict_rate", "view_cnt > 0 AND transaction_cnt > 0"),

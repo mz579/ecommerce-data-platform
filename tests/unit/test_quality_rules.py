@@ -20,7 +20,7 @@ RULES_PER_CATEGORY = {
     "uniqueness": 12,
     "validity": 9,
     "range": 12,
-    "reconciliation": 23,
+    "reconciliation": 24,
 }
 
 D1 = date(2099, 1, 1)
@@ -29,7 +29,7 @@ D2 = date(2099, 1, 2)
 
 def test_catalog_sizes_and_unique_keys():
     catalog = build_rule_catalog()
-    assert len(catalog) == sum(RULES_PER_CATEGORY.values()) == 59
+    assert len(catalog) == sum(RULES_PER_CATEGORY.values()) == 60
     keys = [r.key for r in catalog]
     assert len(keys) == len(set(keys))
     assert all(r.key for r in catalog)
