@@ -536,5 +536,13 @@ def funnel_interval_params(
 ) -> list:
     """Params for the interval-funnel INSERT: the two window columns + lineage,
     then the window pair twice more for the user-level and orders subqueries."""
-    return [window_start, window_end, build_id, loaded_at,
-            window_start, window_end, window_start, window_end]
+    return [
+        window_start,
+        window_end,
+        build_id,
+        loaded_at,
+        window_start,
+        window_end,
+        window_start,
+        window_end,
+    ]

@@ -102,9 +102,7 @@ def open_dashboard(page, key: str) -> None:
 
 def _sweep_panels(page) -> None:
     """Scroll every chart holder into view to fire lazy-loaded queries."""
-    n = page.evaluate(
-        "() => document.querySelectorAll('.dashboard-component-chart-holder').length"
-    )
+    n = page.evaluate("() => document.querySelectorAll('.dashboard-component-chart-holder').length")
     for i in range(n):
         page.evaluate(
             f"""() => {{
@@ -162,8 +160,7 @@ def wait_capture(page, context: str, timeout_s: float = 150.0) -> None:
             _report(context, f"chart stuck/empty: {frag[:90]!r}")
     if not any(ch.isdigit() for t in last_texts for ch in t):
         _report(context, "no chart rendered any numeric value")
-    _report(context, f"bounded wait ({timeout_s:.0f}s) expired; "
-                     f"spinners={_panel_state(page)[1]}")
+    _report(context, f"bounded wait ({timeout_s:.0f}s) expired; spinners={_panel_state(page)[1]}")
 
 
 def assert_markdown_panels(page, context: str) -> None:
@@ -216,8 +213,16 @@ def run_publish_demo() -> None:
     if len(_FAILURES) > 0:
         print("    publish demo SKIPPED (capture failures already recorded)")
         return
-    cmd = [sys.executable, "-m", "ecommerce_dw.cli", "publish",
-           "--dates", "2015-09-16,2015-09-17", "--run", "5"]
+    cmd = [
+        sys.executable,
+        "-m",
+        "ecommerce_dw.cli",
+        "publish",
+        "--dates",
+        "2015-09-16,2015-09-17",
+        "--run",
+        "5",
+    ]
     print("    running publish demo:", " ".join(cmd))
     proc = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True)
     print(proc.stdout.strip())
@@ -252,9 +257,7 @@ def main() -> int:
         # ---- ops: 转化口径 dimension filter before/after ----
         open_dashboard(page, "ops")
         wait_capture(page, "ops metric before")
-        page.screenshot(
-            path=SHOTS / "ops_overview_filter_metric_before.png", full_page=True
-        )
+        page.screenshot(path=SHOTS / "ops_overview_filter_metric_before.png", full_page=True)
         print("saved ops_overview_filter_metric_before.png")
         deselect_strict_apply(page)
         wait_capture(page, "ops metric after")
@@ -264,9 +267,7 @@ def main() -> int:
         # ---- ops: 日期范围 filter before/after ----
         open_dashboard(page, "ops")
         wait_capture(page, "ops date before")
-        page.screenshot(
-            path=SHOTS / "ops_overview_filter_date_before.png", full_page=True
-        )
+        page.screenshot(path=SHOTS / "ops_overview_filter_date_before.png", full_page=True)
         print("saved ops_overview_filter_date_before.png")
         pick_date_filter_value(page, "2015-07-26")
         wait_capture(page, "ops date after")
@@ -304,8 +305,10 @@ def main() -> int:
         for f in _FAILURES:
             print(f"  - {f}")
         return 1
-    print("EVIDENCE OK: every chart rendered values on all captures "
-          "(no 'Waiting on' / 'No results' / stuck spinner)")
+    print(
+        "EVIDENCE OK: every chart rendered values on all captures "
+        "(no 'Waiting on' / 'No results' / stuck spinner)"
+    )
     return 0
 
 

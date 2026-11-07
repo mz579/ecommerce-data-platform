@@ -835,15 +835,29 @@ def verify_dws_ads(
                 iads = cursor.fetchone()
                 if iads is not None:
                     for name in (
-                        "view_users", "cart_users", "buyer_users", "orders",
-                        "conv_strict_users", "conv_global_users",
+                        "view_users",
+                        "cart_users",
+                        "buyer_users",
+                        "orders",
+                        "conv_strict_users",
+                        "conv_global_users",
                     ):
-                        col = ("view_users", "cart_users", "buyer_users", "orders",
-                               "conv_strict_users", "conv_global_users").index(name)
-                        checks.append(MetricCheck(
-                            f"interval.{name}", window_end,
-                            _as_float(iads[col]), direct_interval[name],
-                        ))
+                        col = (
+                            "view_users",
+                            "cart_users",
+                            "buyer_users",
+                            "orders",
+                            "conv_strict_users",
+                            "conv_global_users",
+                        ).index(name)
+                        checks.append(
+                            MetricCheck(
+                                f"interval.{name}",
+                                window_end,
+                                _as_float(iads[col]),
+                                direct_interval[name],
+                            )
+                        )
                     denom = direct_interval["view_users"]
                     for name, num_key, col in (
                         ("add_to_cart_rate", "cart_users", 6),
@@ -852,16 +866,23 @@ def verify_dws_ads(
                     ):
                         num = direct_interval[num_key]
                         expected = None if denom == 0 else num / denom
-                        checks.append(MetricCheck(
-                            f"interval.{name}", window_end, _as_float(iads[col]), expected,
-                        ))
+                        checks.append(
+                            MetricCheck(
+                                f"interval.{name}",
+                                window_end,
+                                _as_float(iads[col]),
+                                expected,
+                            )
+                        )
 
             # Daily distinct item counts (ads_item_behavior_daily) vs direct.
             direct_items: dict[date, dict[str, float]] = {}
             cursor.execute(_ITEM_BEHAVIOR_DIRECT_SQL)
             for day, viewed, carted, bought in cursor.fetchall():
                 direct_items[day] = {
-                    "viewed": float(viewed), "carted": float(carted), "bought": float(bought),
+                    "viewed": float(viewed),
+                    "carted": float(carted),
+                    "bought": float(bought),
                 }
             cursor.execute(
                 "SELECT event_date_utc, items_viewed, items_carted, items_bought "
@@ -878,10 +899,14 @@ def verify_dws_ads(
                     ("carted", carted, d["carted"]),
                     ("bought", bought, d["bought"]),
                 ):
-                    checks.append(MetricCheck(
-                        f"item_behavior.{name}", day,
-                        None if ads_v is None else float(ads_v), direct_v,
-                    ))
+                    checks.append(
+                        MetricCheck(
+                            f"item_behavior.{name}",
+                            day,
+                            None if ads_v is None else float(ads_v),
+                            direct_v,
+                        )
+                    )
 
             return AggVerifyReport(tuple(checks))
         finally:

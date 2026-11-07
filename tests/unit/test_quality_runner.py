@@ -60,7 +60,10 @@ def test_validate_publish_scope_positive_and_negative():
             assert reason is None, (run_type, run_csv, req_type, req_csv)
         else:
             assert reason is not None and "publish refused" in reason, (
-                run_type, run_csv, req_type, req_csv,
+                run_type,
+                run_csv,
+                req_type,
+                req_csv,
             )
     assert allowed == 2
     assert len(_pairs()) == 7

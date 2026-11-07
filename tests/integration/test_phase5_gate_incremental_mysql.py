@@ -267,9 +267,7 @@ def test_quality_gate_and_incremental_end_to_end(cfg, tmp_path, tracked):
 
     # FULL build (no date list) so the single-row interval funnel is also
     # built and exercised by _verify_build's FULL-only invariants.
-    res = agg_builder.build_dws_ads(
-        cfg, window_start=D1, window_end=D3, top_n=100
-    )
+    res = agg_builder.build_dws_ads(cfg, window_start=D1, window_end=D3, top_n=100)
     tracked(agg_id=res.build_id)
     assert res.status == "LOADED"
     assert res.scope_type == "FULL"
@@ -432,9 +430,10 @@ def test_publish_gate_scope_enforcement(cfg, tmp_path, tracked):
     pid2 = publish_ads_scope(cfg, dates=(D3, D2), quality_run_id=dates_run.run_id)
     assert pid2 > pid
     assert _scalar(cfg, "SELECT COUNT(*) FROM ads_publish_log") == 2
-    assert _scalar(
-        cfg, "SELECT dates_csv FROM ads_publish_log WHERE publish_id = %s", (pid2,)
-    ) == "2099-01-02,2099-01-03"
+    assert (
+        _scalar(cfg, "SELECT dates_csv FROM ads_publish_log WHERE publish_id = %s", (pid2,))
+        == "2099-01-02,2099-01-03"
+    )
 
     # positive: fresh gate with no --run (dateless) backs a FULL publish
     pid3 = publish_ads_scope(cfg, catalog=_CATALOG)
