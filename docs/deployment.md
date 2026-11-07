@@ -438,4 +438,4 @@ docker compose up -d --force-recreate superset-init && docker compose up -d supe
 - [ ] Airflow `dags list` 可见 `ecommerce_daily_pipeline`；schedule `0 4 * * *`
 - [ ] Superset 4.1.2；3 看板 21 图；`superset_ro` 仅 SELECT
 - [ ] `python scripts/demo_phase8.py` 通过，生产 13 表基线不变
-- [ ] `python -m pytest` 158 passed / 1 skipped；DAG 契约 5 passed
+- [ ] `python -m pytest` 216 passed / 1 skipped；DAG 契约 5 passed

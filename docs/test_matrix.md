@@ -1,13 +1,13 @@
-# Phase 8 测试矩阵与指标正确性基线
+# Phase 8–9.2 测试矩阵与指标正确性基线
 
-> 本文是 Phase 8（测试 / 性能 / 交付硬化）的测试矩阵与手工样例说明。测试只写
-> `*_test` schema 或一次性独立 schema，**不触碰生产库 `ecommerce_dw` 的数据**。
-> 所有结果均为本机真实执行输出，不是推算。
+> 本文覆盖 Phase 8（测试 / 性能 / 交付硬化）与 Phase 9.2（Kafka 回放/校验）的测试矩阵与
+> 手工样例说明。测试只写 `*_test` schema 或一次性独立 schema，**不触碰生产库
+> `ecommerce_dw` 的数据**。所有结果均为本机真实执行输出，不是推算。
 >
 > 交付命令（项目根目录，venv 已激活）：
 >
 > ```bash
-> python -m pytest                 # 宿主：158 passed, 1 skipped in 11.91s
+> python -m pytest                 # 宿主：216 passed, 1 skipped in 15.32s
 > docker compose exec -T airflow-scheduler python -m pytest tests/dag   # 5 passed
 > ruff check . && ruff format --check .                                   # 全绿
 > python scripts/demo_phase8.py    # 一键 8 步演示（见 performance.md §8）
@@ -25,17 +25,21 @@
 | 单元：质量 | `tests/unit/test_quality_rules.py`、`test_quality_runner.py` | 规则参数化、scope guard、FAIL 阻断、结果落库 | `pytest tests/unit` | 14 passed |
 | 单元：运维 | `tests/unit/test_ops_validate.py`、`test_ops_window.py` | 源文件校验、窗口计算、边界日期 | `pytest tests/unit` | 18 passed |
 | 单元：部署授权 | `tests/unit/test_superset_grants.py` | `MYSQL_RO_USER` 解析、CREATE/ALTER/GRANT 语句生成、dry-run 密码脱敏、字面量转义 | `pytest tests/unit/test_superset_grants.py` | 5 passed |
+| 单元：实时回放/校验（9.2） | `tests/unit/test_streaming_events.py`、`test_streaming_replay.py`、`test_streaming_validate_consumer.py`、`test_rt_ddl_grants.py` | event_v1 消息构造/时间格式/quality_flags/transaction 条件、producer 配置、DLQ 决策与统计、RT DDL 5 表、库名守卫与最小权限 SQL | `pytest tests/unit/test_streaming_events.py tests/unit/test_streaming_replay.py tests/unit/test_streaming_validate_consumer.py tests/unit/test_rt_ddl_grants.py` | **56 passed** |
 | 集成：ODS | `tests/integration/test_ods_mysql.py` | 真实 MySQL 建表、CSV 装载、幂等重载、脏行保留 | `pytest tests/integration/test_ods_mysql.py` | 7 passed |
 | 集成：DWD | `tests/integration/test_dwd_mysql.py` | 真实 DWD 构建、去重/拒绝分表、账实一致、重复构建幂等 | `pytest tests/integration/test_dwd_mysql.py` | 3 passed |
 | 集成：DWS/ADS | `tests/integration/test_dws_ads_mysql.py` | 既有手工样例全链路、指标口径、`verify_dws_ads` | `pytest tests/integration/test_dws_ads_mysql.py` | 1 passed |
 | 集成：质量 + 增量 | `tests/integration/test_phase5_gate_incremental_mysql.py` | 60 条规则真实执行、publish 拦截、水位增量 | `pytest tests/integration/test_phase5_gate_incremental_mysql.py` | 2 passed |
 | 集成：Airflow 控制面 | `tests/integration/test_phase6_airflow_control_mysql.py` | 任务控制表 / run 记录 / 重试状态 | `pytest tests/integration/test_phase6_airflow_control_mysql.py` | 3 passed |
+| 集成：Kafka 实时链路（9.2） | `tests/integration/test_streaming_kafka.py` | 唯一 selftest topic 全合法往返、非法 JSON 进测试 DLQ、生产 topic/DLQ 不受影响 | `pytest tests/integration/test_streaming_kafka.py` | **2 passed**（Kafka 不可达时按设计 skip） |
 | **E2E：ODS→DWD→DWS→ADS** | `tests/integration/test_phase8_e2e_mysql.py` | 手工样例端到端、独立 SQL/Python 复算、幂等快照 | `pytest tests/integration/test_phase8_e2e_mysql.py` | 1 passed |
 | **DAG 契约** | `tests/dag/test_airflow_dag_contract.py` | 导入无 DB 副作用、10 任务线性链、重试/超时、调度语义、真实 CLI | 容器内 `pytest tests/dag` | 5 passed |
 | 部署冒烟 | `scripts/check_db_health.py`、`scripts/demo_phase8.py` 第 1/7 步 | MySQL/PostgreSQL/Airflow/Superset `/health`、生产行数基线 | `python scripts/demo_phase8.py` | 通过（见 §5） |
 
-宿主全量结果：**158 passed, 1 skipped in 11.91s, exit 0**。1 skipped 是
-`tests/dag` 在宿主缺少 `apache-airflow` 时按设计整模块跳过；同一文件在真实
+宿主全量结果：**216 passed, 1 skipped in 15.32s, exit 0**（2026-11-07 最新运行日志
+`pytest_full.log`；耗时随机器负载略有波动，以最新日志为准）。构成：Phase 8 既有
+**158 passed** + Phase 9.2 新增 **58 passed**（56 单元 + 2 Kafka 集成）= **216 passed**。
+1 skipped 是 `tests/dag` 在宿主缺少 `apache-airflow` 时按设计整模块跳过；同一文件在真实
 Airflow scheduler 容器内 5 passed in 1.30s。
 
 ## 2. 手工样例数据（`tests/fixtures/phase8_manual/`）
