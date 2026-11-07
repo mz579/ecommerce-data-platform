@@ -294,7 +294,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 | Phase 9.3 恢复演练 | `flink cancel` → `flink run -d -s <chk-1>` | `restored:1`，续读位点非 0，恢复后对账仍 39/39 MATCH |
 | Phase 9.4 全量回放 | `python scripts/run_full_reconciliation.py --evidence-dir <dir> --reset-rt --reconcile` | 20 批覆盖 137 完整日；DWD **2,755,641** 条事件，含前瞻日重复回放共发出 **3,599,961** 条，checkpoint 122 成功 / 0 失败 |
 | Phase 9.4 全量对账 | `python scripts/reconcile_all.py --write`（只读 `rt_recon_ro` + `rt_app` 写审计表） | **1,781 MATCH / 0 DIFF / 26 SKIP**，审计表 1,807 行，`RECONCILIATION_OK` |
-| Phase 9.4 容量验收 | `--rate 5000` 与单批 `--rate 10000`；采样 REST 指标 | 生产者 4,991–9,755 msg/s；延迟 p50 中位 16.5 ms / p95 中位 98 ms（max 671 ms）；反压 0；state 最大 41 MB |
+| Phase 9.4 容量验收 | `--rate 5000` 与单批 `--rate 10000`；采样 REST 指标 | 生产者 4,991–9,755 msg/s；端到端延迟活跃期 p50 中位 478 ms / p95 中位 549 ms（含 0 值口径 p95 中位 115 ms，偏乐观；回放进行中去重后 p95 中位 170 ms），最大观测 671 ms；反压 0；state 最大 41 MB |
 
 测试矩阵与手算基线见 `docs/test_matrix.md`；性能优化与 EXPLAIN 见 `docs/performance.md`。
 
@@ -365,8 +365,10 @@ cancel → checkpoint → `flink run -s` 恢复演练 `restored:1` 且续读位�
 2015-05-03..2015-09-18 全部 137 个完整日；`rt_traffic_daily` 139 行（138 final）、
 `rt_funnel_daily` 973 行、`rt_item_behavior_daily` 139 行；`rt_reconciliation_daily`
 **1,807 行（1,781 MATCH / 0 DIFF / 26 SKIP）**，ADS 与 DWD 交叉复核同样 0 差异。
-实测生产者 4,991–9,755 msg/s、端到端 p95 中位 98 ms（max 671 ms）、反压 0、
-checkpoint 122 成功 / 0 失败、state 最大 41 MB。详见 `docs/streaming_design.md` §11.4。
+实测生产者 4,991–9,755 msg/s；端到端延迟按活跃期口径 p50 中位 478 ms、p95 中位 549 ms
+（回放进行中去重后 p95 中位 170 ms，含 0 值口径 p95 中位 115 ms 偏乐观），
+最大观测 671 ms；反压 0、checkpoint 122 成功 / 0 失败、state 最大 41 MB。
+详见 `docs/streaming_design.md` §11.4。
 
 常用命令：
 

@@ -583,7 +583,7 @@ Kafka 不会重投历史；即使某批重试造成重复，作业内 48h `event
 
 | 指标 | 定义/来源 | 目标/告警建议 |
 | --- | --- | --- |
-| 回放端到端延迟 | `processing_time - ingest_time`（p50/p95）；Flink 指标 `ingest_latency_p50_ms` / `ingest_latency_p95_ms`（ParseFunction 内的 10,000 样本直方图） | p95 < 5s；持续 > 30s 告警 |
+| 回放端到端延迟 | `processing_time - ingest_time`（p50/p95）；Flink 指标 `ingest_latency_p50_ms` / `ingest_latency_p95_ms`（ParseFunction 内的 10,000 样本直方图）。**须按活跃期口径评估**：宿主机与容器双时钟会让部分采样被截断为 0，回放停止后 gauge 冻结重复，含 0 值的中位数会严重偏乐观（见 §11.4.3） | p95 < 5s（活跃期/回放进行中口径）；持续 > 30s 告警 |
 | 事件时间水位线滞后 | `max_event_time_seen - watermark` | < 60s（正常回放） |
 | 吞吐 | Kafka records-in / Flink `numRecordsInPerSecond`；9.4 另用累计 `numRecordsIn` 计数器差分算区间吞吐（`*PerSecond` 是 60s EWMA，短批次会低估） | 达到回放目标速率，无持续下降 |
 | 反压/空闲 | 每个 operator 的 `backPressuredTimeMsPerSecond` / `idleTimeMsPerSecond` / `busyTimeMsPerSecond` | 反压持续 > 50% 或 busy=100% 需扩容 |
@@ -686,6 +686,9 @@ docker compose stop flink-taskmanager flink-jobmanager kafka
   9.4 实测生产者 5,000 档稳定 4,991–4,999 msg/s、单批 10,000 档实测 9,755 msg/s。
 - Flink 2 slots（1 TM / 160 MB task heap）在 7 天 + 2 前瞻日的批次下可持续 9.6k msg/s，
   反压恒为 0，checkpoint 58–352 ms、state 10–41 MB。
+- 端到端延迟分两种口径：含 0 值全部采样 p50 中位 15 ms / p95 中位 115 ms（偏乐观）；
+  活跃期 p50 中位 478 ms、p95 中位 549 ms；回放进行中去重后 p95 中位 170 ms。
+  单一最大观测 671 ms，均远低于 5 s 目标。0 值来自宿主机/容器双时钟截断，非直方图空窗。
 - 结果表规模：139 个日 × 3 张日表 + 139 × 7 漏斗行，远小于离线 ADS；MySQL 同实例无压力。
 - 真正的瓶颈是**批次大小 / task heap**（7 天是稳定上限），以及宿主内存，不是 Kafka/Flink 吞吐。
 
@@ -1137,9 +1140,12 @@ finalize，而回放/验收在 09-18 结束，作业已 cancel。下游查询必
 | 生产者吞吐 5000 档 | 19 批稳定在 **4,991.0–4,999.4 msg/s** | `replay_to_kafka.py` 最终 summary |
 | 生产者吞吐 10000 档 | 第 2 批 **9,755.0 msg/s**（20.8 s 发完 202,718 条） | 同上 |
 | Flink source 计数器差分 | 5000 档（批次 1–19）每批中位数 **4,977–5,014 msg/s**；10000 档峰值 **9,622.8 msg/s** | `numRecordsIn` 相邻采样差分 |
-| `numRecordsInPerSecond`（EWMA） | 峰值 3,765.4 msg/s | 逐 operator gauge（60 s EWMA，短批次会低估） |
-| 端到端延迟 p50 | 中位数 **16.5 ms**，p95 **601 ms**，最大 **601 ms** | `ingest_latency_p50_ms` gauge（474 个读数） |
-| 端到端延迟 p95 | 中位数 **98 ms**，p95 **671 ms**，最大 **671 ms** | `ingest_latency_p95_ms` gauge（474 个读数） |
+| `numRecordsInPerSecond`（EWMA） | 峰值 **3,765.4 msg/s** | `summarize_samples(...)["numRecordsInPerSecond"]["Source__kafka-source-ecommerce_events_v1"]["max"]`（60 s EWMA，短批次会低估） |
+| 端到端延迟 p50（含 0 值，全部 239 采样） | 中位数 **15 ms**，p95 **601 ms**，最大 **601 ms**（111 个采样为 0，2 个为 NaN） | `ingest_latency_p50_ms` gauge，每采样取两 subtask 最大值 |
+| 端到端延迟 p50（活跃期，仅 >0） | n=**126**，min **8 ms**，中位 **478 ms**，p95 **601 ms**，max **601 ms** | 同上，剔除 0 值 |
+| 端到端延迟 p95（含 0 值，全部 239 采样） | 中位数 **115 ms**，p95 **671 ms**，最大 **671 ms**（95 个采样为 0，2 个为 NaN） | `ingest_latency_p95_ms` gauge |
+| 端到端延迟 p95（活跃期，仅 >0） | n=**142**，min **25 ms**，中位 **527 ms**，p95 **671 ms**，max **671 ms**；在 p50>0 的 126 个配对上 p95 中位 **549 ms**（min 61 / max 671） | 同上，剔除 0 值 |
+| 端到端延迟 p95（活跃期去重 / 回放进行中） | 去重后 n=**27**，中位 **296 ms**，max **671 ms**；仅回放进行中 n=**33**，中位 **170 ms**，max **562 ms** | 剔除 0 值与连续重复读数（gauge 在回放停止后冻结） |
 | 反压 `backPressuredTimeMsPerSecond` | 478 个读数 **全部为 0**（max 0.0） | 逐 subtask/vertex |
 | 空闲 `idleTimeMsPerSecond` | 峰值 1000（100%），448/478 非零 | 逐 subtask（回放间隙正常空闲） |
 | checkpoint 成功/失败 | **122 / 0**（成功率 100%） | REST `/jobs/<id>/checkpoints` |
@@ -1147,11 +1153,51 @@ finalize，而回放/验收在 09-18 结束，作业已 cancel。下游查询必
 | checkpoint 大小 | **10.3 MB – 41.0 MB**，中位数 35.0 MB | `state_size` |
 | Kafka lag | 244 个采样，峰值 88,435（回放中），每批收尾均归 **0** | AdminClient committed offset + watermark |
 
+**延迟口径说明（为什么必须区分多种中位数）**。延迟 = `processing_time - ingest_time`，
+`ingest_time` 由 **Windows 宿主机上的回放器** 写入，`processing_time` 由 **WSL2/Docker 里的
+TaskManager** 取 `System.currentTimeMillis()`，两者是**两个未同步的时钟**。实测该环境里
+容器时钟相对宿主机的偏差**不是常数**，会随 WSL 与宿主时钟漂移而变化：同一长驻探针
+在 60 s 内测得 **-1,066 ms ~ +596 ms（跨度 1,662 ms，约 1.7 s）**
+（`logs/latency_clock_skew.txt`）；不同时刻的独立复测结果差异很大——另一次 20 次
+midpoint 探针为 **-350 ~ -228 ms**（跨度 122 ms，`logs/latency_clock_skew_midpoint.txt`），
+另一次独立复测则为 **+966 ~ +1,101 ms**（跨度 135 ms，恒为正）。因此延迟绝对值
+只能作趋势参考，不能当作精确 SLO 读数。
+`ParseFunction` 用
+`Math.max(0L, now - ingestTime)` 截断负值，因此当容器时钟暂时落后于宿主机时，
+该窗口内的真实队列延迟会被**截断成 0**。这类 0 值不是“直方图为空返回 0”：
+gauge 在直方图无样本时返回 `NaN`（244 个采样里只有 2 个 NaN）；而在 111 个
+0 值采样中，直方图自身的 `_median` 也确实是 0，gauge 与直方图分位数在 237/239
+个采样上完全一致——即 0 是**记录进直方图的真实 0 值**，来源是上面的截断。
+（另有 27 个 0 值采样其直方图 `max>0`，说明同一窗口里既有 0 值也有非 0 值。）
+
+因此本报告给出三套口径，**不混用**：
+
+- **含 0 值**（全部 239 个采样）：反映“观测窗口里有多大比例被截断为 0”，
+  p50 中位 15 ms / p95 中位 115 ms，这个数字**偏乐观**，不能用来证明达标。
+- **活跃期**（剔除 0 值，只保留 `p50>0` 的采样）：反映回放真正在跑时的端到端延迟，
+  p50 n=126 / 中位 478 ms / max 601 ms，p95 中位 549 ms / max 671 ms。
+
+**活跃期口径本身也偏高，需要再说明一层**：5k 档每批回放只有 13–45 s，而第 20 批在
+回放结束（12.9 s）后还要等 `is_final` 约 308 s。直方图只在有新记录时更新，回放一停，
+gauge 就**冻结并重复最后读数**——第 20 批 58 个采样里只有 3 种取值（含 1 个空采样），
+其中 **55 个是同一个冻结值**（p50 601/539、p95 660/671）。这 57 个活跃采样占全部
+126 个活跃采样的 45%，把中位数从“回放进行中”的水平拉高到 478/549 ms。去掉连续重复读数后：
+**活跃期去重 n=27，p50 中位 218 ms / max 601 ms，p95 中位 296 ms / max 671 ms**；
+若只看**回放进行中**（每批 `started_at` 到回放 elapsed 结束）且活跃的采样，
+**n=33，p50 中位 108 ms / max 508 ms，p95 中位 170 ms / max 562 ms**。
+
+三种口径的 p95 中位分别是 170 / 296 / 549 ms，**单一观测最大值 671 ms**，
+**都远低于 5 s 目标**；结论对口径不敏感，因此可以判定达标。
+
 容量结论：单 TM / 2 slots / 160 MB task heap 的配置下，**端到端可持续 9.6k msg/s**
 （第 2 批 10,000 档实测 9,755 msg/s 完成，无重试、无反压），5k 档有约 2× 余量；
-状态与 checkpoint 峰值 41 MB，距 100 MB 上限约 2.4× 余量；瓶颈不是 Kafka/Flink，
-而是**批次大小**——7 天 + 2 前瞻日是 160 MB heap 下能稳定完成的规模，扩大到 10 天
-曾在早期冒烟中接近内存上限，故保持 7 天。
+**端到端 p95 在活跃期口径下中位 549 ms、回放进行中 170 ms、最大观测 671 ms，远低于
+5 s 目标**（§9 表）。状态与 checkpoint 峰值 41 MB，距 100 MB 上限约 2.4× 余量；
+瓶颈不是 Kafka/Flink，而是**批次大小**——7 天 + 2 前瞻日是 160 MB heap 下能稳定完成的规模，扩大到 10 天
+曾在早期冒烟中接近内存上限，故保持 7 天。需要注意：延迟指标跨了宿主/容器两个时钟，
+偏差非恒定（不同时刻从约 +1 s 到 ±1.7 s 摆动），绝对值只作趋势参考；要得到无偏差的
+端到端延迟，应让回放器与 Flink
+同处一个时钟域（例如回放器也放进容器），或改用 Kafka 消息时间戳而非本地时钟。
 
 #### 11.4.4 生产基线与代码质量
 
@@ -1175,6 +1221,7 @@ finalize，而回放/验收在 09-18 结束，作业已 cancel。下游查询必
 | 4 | **`numRecordsInPerSecond` 低估**：Flink 的 60 s EWMA 对 30–60 s 的批次只能到 3,765 msg/s，真实速率要用累计计数器差分（本报告已同时给出两者）。REST 采样偶尔返回上一轮计数器值，差分实现已折叠重复读数。 |
 | 5 | **2015-09-18 非 final**：预期行为（部分日，窗口未到 finalize 时间），对账写 `SKIP`，见 §11.4.2。 |
 | 6 | **对账脚本两条真实路径曾无单测覆盖**：首版 `--write` 在默认元组游标上取 `row["db"]` 崩溃、`--json-out` 因 `date` 不可序列化崩溃。已修复（游标类型无关的守卫 + `isoformat()`），并补 4 条回归单测；随后用真实 `--write --json-out` 跑通，审计表 1,807 行。 |
+| 7 | **端到端延迟受双时钟影响，0 值不是空直方图**：`ingest_time` 由 Windows 宿主机回放器写入，`processing_time` 由 WSL2/Docker TaskManager 取本地时钟，二者未同步；该偏差**非恒定**、随 WSL 与宿主时钟漂移而变——一次长驻探针在 60 s 内测得 -1,066 ~ +596 ms（跨度 1,662 ms，约 1.7 s，`logs/latency_clock_skew.txt`），不同时刻的复测分别为 -350 ~ -228 ms（跨度 122 ms，`logs/latency_clock_skew_midpoint.txt`）和 +966 ~ +1,101 ms（跨度 135 ms），故延迟绝对值只能作趋势参考。`Math.max(0L, ...)` 把负值截断为 0。gauge 在直方图空时返回 `NaN`（244 个采样仅 2 个 NaN），237/239 个采样 gauge 与直方图分位数完全一致，说明 0 是真实 0 值而非空窗默认值。另外回放停止后 gauge 冻结重复最后读数（第 20 批 58 个采样仅 3 个不同组合）。因此延迟报告分三套口径（含 0 / 活跃期 / 回放进行中去重），达标判断以“回放进行中 p95 中位 170 ms、最大观测 671 ms”为准，见 §11.4.3。 |
 
 ## 12. 风险与后续
 
