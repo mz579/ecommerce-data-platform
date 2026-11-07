@@ -39,7 +39,10 @@ CREATE TABLE IF NOT EXISTS dwd_events_stage (
     PRIMARY KEY (row_key),
     UNIQUE KEY uk_dwd_stage_source (source_file, source_row_number),
     KEY idx_dwd_stage_dedup (dedup_key, source_row_number),
-    KEY idx_dwd_stage_date (event_date_utc)
+    KEY idx_dwd_stage_date (event_date_utc),
+    -- Phase 8 perf: the three split statements filter by (build_id, record_status);
+    -- without this index each split scanned all 2.7M stage rows (~20s each).
+    KEY idx_dwd_stage_build (build_id, record_status)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COLLATE = utf8mb4_0900_ai_ci

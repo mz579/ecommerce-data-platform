@@ -277,7 +277,10 @@ FROM (
     FROM `dwd_events_stage` st
     WHERE st.record_status = 'OK' AND st.build_id = %s
 ) s
-LEFT JOIN (SELECT DISTINCT dedup_key FROM `dwd_events`) e ON e.dedup_key = s.dedup_key
+-- Phase 8 perf: join the UNIQUE dedup_key index directly (eq_ref). The previous
+-- "LEFT JOIN (SELECT DISTINCT dedup_key FROM dwd_events)" materialised every
+-- 2.7M key on each split statement; semantics are identical without DISTINCT.
+LEFT JOIN `dwd_events` e ON e.dedup_key = s.dedup_key
 WHERE s.rn = 1 AND e.dedup_key IS NULL
 """
 
@@ -294,7 +297,8 @@ FROM (
     FROM `dwd_events_stage` st
     WHERE st.record_status = 'OK' AND st.build_id = %s
 ) s
-LEFT JOIN (SELECT DISTINCT dedup_key FROM `dwd_events`) e ON e.dedup_key = s.dedup_key
+-- Same Phase 8 perf rewrite as the winner split (UNIQUE dedup_key eq_ref join).
+LEFT JOIN `dwd_events` e ON e.dedup_key = s.dedup_key
 WHERE s.rn > 1 OR e.dedup_key IS NOT NULL
 """
 

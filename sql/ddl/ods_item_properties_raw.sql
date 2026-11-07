@@ -22,7 +22,11 @@ CREATE TABLE IF NOT EXISTS ods_item_properties_raw (
     loaded_at        DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '本批次写入时刻（UTC）',
     PRIMARY KEY (row_key),
     UNIQUE KEY uk_ods_ip_raw_source (source_file, source_row_number),
-    KEY idx_ods_ip_raw_batch (ingest_batch_id)
+    KEY idx_ods_ip_raw_batch (ingest_batch_id),
+    -- Phase 8 perf: DWS category as-of fills scan property='categoryid' over 20M
+    -- rows (62s -> 13s measured); quality batch grouping benefits from file_batch.
+    KEY idx_ods_ip_raw_property (property),
+    KEY idx_ods_ip_raw_file_batch (source_file, ingest_batch_id)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COLLATE = utf8mb4_0900_ai_ci

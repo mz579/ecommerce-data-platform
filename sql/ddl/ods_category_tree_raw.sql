@@ -18,7 +18,9 @@ CREATE TABLE IF NOT EXISTS ods_category_tree_raw (
     loaded_at        DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '本批次写入时刻（UTC）',
     PRIMARY KEY (row_key),
     UNIQUE KEY uk_ods_ct_raw_source (source_file, source_row_number),
-    KEY idx_ods_ct_raw_batch (ingest_batch_id)
+    KEY idx_ods_ct_raw_batch (ingest_batch_id),
+    -- Phase 8 perf: parity with the other two ODS tables for the batch grouping.
+    KEY idx_ods_ct_raw_file_batch (source_file, ingest_batch_id)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COLLATE = utf8mb4_0900_ai_ci

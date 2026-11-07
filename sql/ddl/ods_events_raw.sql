@@ -24,7 +24,13 @@ CREATE TABLE IF NOT EXISTS ods_events_raw (
     loaded_at        DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '本批次写入时刻（UTC）',
     PRIMARY KEY (row_key),
     UNIQUE KEY uk_ods_events_raw_source (source_file, source_row_number),
-    KEY idx_ods_events_raw_batch (ingest_batch_id)
+    KEY idx_ods_events_raw_batch (ingest_batch_id),
+    -- Phase 8 perf: quality rules GROUP BY (source_file, ingest_batch_id); this
+    -- composite index makes ods_batch_log_rowcount/coverage index-only scans.
+    -- NOTE: a functional index on CAST(`timestamp` AS UNSIGNED) was evaluated and
+    -- rejected: it makes a raw non-numeric timestamp fail INSERT with error 3751,
+    -- breaking the ODS contract that keeps dirty rows for DWD rejection.
+    KEY idx_ods_events_raw_file_batch (source_file, ingest_batch_id)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COLLATE = utf8mb4_0900_ai_ci
