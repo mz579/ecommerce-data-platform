@@ -462,7 +462,7 @@ docker compose up -d --force-recreate superset-init && docker compose up -d supe
 - [ ] Airflow `dags list` 可见 `ecommerce_daily_pipeline`；schedule `0 4 * * *`
 - [ ] Superset 4.1.2；3 看板 21 图；`superset_ro` 仅 SELECT
 - [ ] `python scripts/demo_phase8.py` 通过，生产 13 表基线不变
-- [ ] `python -m pytest` 236 passed / 1 skipped；DAG 契约 5 passed
+- [ ] `python -m pytest` 275 passed / 1 skipped；DAG 契约 5 passed
 - [ ] Phase 9.3/9.4：`bash scripts/build_flink_job.sh` 输出 `SELFTEST passed=48 failed=0` 与
       `BUILD_FLINK_JOB_OK`；`bash scripts/deploy_flink_job.sh` 打印 JobID；
       `python scripts/verify_rt_vs_dwd.py <from> <to>` 输出 `VERIFY_RT_VS_DWD_OK`；
