@@ -276,7 +276,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| 宿主全量测试 | `python -m pytest` | **153 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
+| 宿主全量测试 | `python -m pytest` | **158 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
 | DAG 契约测试 | `docker compose exec -T airflow-scheduler python -m pytest tests/dag` | **5 passed** |
 | 代码规范 | `ruff check . && ruff format --check .` | 全绿 |
 | 一键端到端演示 | `python scripts/demo_phase8.py` | 8 步通过，约 **4.2s**，生产 13 张表行数不变 |
