@@ -8,16 +8,17 @@
 
 Phase 0 交付工程骨架：目录结构、Python 工程配置、两套数据库的容器编排、最小
 可运行测试与运维脚本。Phase 1~5 依次完成探索 / ODS / DWD / DWS+ADS / 增量+质量门禁
-（见 README「当前状态」），**Phase 6 已接入 Airflow 编排**（见 `docs/airflow_design.md`）。
+（见 README「当前状态」），**Phase 6 已接入 Airflow 编排**（见 `docs/airflow_design.md`），
+**Phase 7 已接入 Superset 看板**（见 `docs/superset_design.md`）。
 
 ## 2. 组件职责
 
 | 组件 | 职责 | 形态 |
 | --- | --- | --- |
 | MySQL 8.0.x | 业务数仓：ODS / DWD / DWS / ADS 四层建模，库名 `ecommerce_dw` | Phase 0 起编排 |
-| PostgreSQL 16.x | Airflow / Superset 元数据库：作业实例、DAG 定义、XCom、看板与用户权限，库名 `meta` | Phase 0 起编排 |
+| PostgreSQL 16.x | Airflow / Superset 元数据库：作业实例、DAG 定义、XCom、看板与用户权限，库名 `meta`（Superset 独立库 `superset_meta`） | Phase 0 起编排 |
 | Airflow 2.10.x | 定时编排 ETL 作业（LocalExecutor + 独立 meta 元库） | **Phase 6 已接入** |
-| Superset | 可视化看板，只读访问业务数仓 | 后续 Phase |
+| Superset | 可视化看板，只读访问业务数仓（`superset_ro` 账号） | **Phase 7 已接入** |
 | Kafka + Flink | 实时链路：点击 / 加购实时指标 | 后续 Phase |
 
 ## 3. 端口约定（宿主机映射，端口可在 `.env` 调整）
@@ -27,6 +28,7 @@ Phase 0 交付工程骨架：目录结构、Python 工程配置、两套数据�
 | MySQL | 3306 | 3306 | `MYSQL_PORT` | 业务数仓 |
 | PostgreSQL | 5432 | 5432 | `POSTGRES_PORT` | 元数据库 |
 | Airflow Web | 8080 | 8080 | `AIRFLOW_UI_PORT` | Phase 6 新增：Web UI（调度/日志/触发/回填） |
+| Superset Web | 8088 | 8088 | `SUPERSET_UI_PORT` | Phase 7 新增：看板（只读 ADS / 受控视图） |
 
 ## 4. 版本决策
 
@@ -38,11 +40,14 @@ Phase 0 交付工程骨架：目录结构、Python 工程配置、两套数据�
   新大版本，行为漂移难以排查。
 
 **tag 核对情况（已核实）**：`mysql:8.0.43`、`postgres:16.13` 已在本机实际拉取确认
-存在；`apache/airflow:2.10.5-python3.11` 同样通过
-`docker pull docker.1ms.run/apache/airflow:2.10.5-python3.11` 拉取成功后 tag 回标准名
+存在；`apache/airflow:2.10.5-python3.11` 与 `apache/superset:4.1.2` 同样通过
+`docker pull docker.1ms.run/apache/airflow:2.10.5-python3.11` / `docker pull
+docker.1ms.run/apache/superset:4.1.2` 拉取成功后 tag 回标准名
 （Docker Hub 直连不通，见 README「已验证环境」）。自定义镜像
 `ecommerce-airflow:2.10.5-python3.11` 由 `docker/airflow/Dockerfile` 构建
-（在 base 之上 editable 安装本项目 + MySQL/Postgres provider）。
+（在 base 之上 editable 安装本项目 + MySQL/Postgres provider）；自定义镜像
+`ecommerce-superset:4.1.2` 由 `docker/superset/Dockerfile` 构建（在 base 之上
+补 `pymysql` + `psycopg2-binary`，官方镜像缺 MySQL 驱动）。
 
 ## 5. 数据流示意
 
@@ -97,7 +102,10 @@ Airflow 的非业务状态（DAG 运行记录、XCom、控制表引用）存于 
 - **Phase 5**：增量处理与质量门禁。
 - **Phase 6 ✅ 已完成**：Airflow 编排与 DAG 开发（LocalExecutor + PostgreSQL
   元数据库；设计、参数/回填手册、故障排查与实测证据见 `docs/airflow_design.md`）。
-- **Phase 7**：Superset 看板。
+- **Phase 7 ✅ 已完成**：Superset 看板（独立元库 `superset_meta`；只读账号
+  `superset_ro` 仅 SELECT 4 张 ADS 表 + 5 张受控视图；`apache/superset:4.1.2`
+  镜像 + 最小 Dockerfile；3 个看板 21 张图 + 原生筛选器；一条命令从空元库
+  重建——设计/口径/验收证据见 `docs/superset_design.md`）。
 - **Phase 8**：测试、性能与交付（V1.0）。
 - **Phase 9**：Kafka + Flink 实时扩展（`streaming/` 目录落地）。
 - **Phase 10**：Spark 批处理（可选）。
@@ -117,3 +125,9 @@ Airflow 的非业务状态（DAG 运行记录、XCom、控制表引用）存于 
   元库 `meta` 完成 alembic 迁移；`dags list` 可见 `ecommerce_daily_pipeline`；
   手动触发小窗口全任务 success、幂等复跑行数不变、重试演示通过——
   证据与命令见 `docs/airflow_design.md` §9。
+- **Phase 7 已验证（实测）**：`ecommerce-superset:4.1.2` 镜像构建成功；
+  `superset-init` 退出码 0（建 `superset_meta` 库 + alembic 迁移 + 幂等 admin +
+  导入看板包 + 修正连接口令）；`superset` 容器 healthy、`superset version` = `4.1.2`；
+  `superset_ro` SHOW GRANTS 仅 SELECT 4 张 ADS 表 + 5 张受控视图；三个看板
+  dashboard_slices = 11 / 5 / 5；5 项关键指标与直连 SQL ALL MATCH；原生筛选器
+  before/after 与发布刷新均有 UI 实测截图——证据与命令见 `docs/superset_design.md` §9。

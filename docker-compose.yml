@@ -1,19 +1,24 @@
 # ==================================================================
-# ecommerce-data-platform — 数据仓库 + Airflow 编排（Phase 6）
+# ecommerce-data-platform — 数据仓库 + Airflow 编排 + Superset 看板（Phase 6-7）
 #
 # 服务：
 #   - mysql    ：业务数仓（ODS/DWD/DWS/ADS 全在 MySQL，含各层控制表）
-#   - postgres ：元数据库 meta（Airflow 元数据 + Superset 元数据，与业务库严格分离）
+#   - postgres ：元数据库 meta（Airflow 元数据）+ 独立库 superset_meta（Superset
+#                元数据，与业务库严格分离、与 Airflow 元库物理隔离）
 #   - airflow-init     ：一次性初始化（建元库 schema + 幂等建管理员用户）
 #   - airflow-scheduler：LocalExecutor 调度器（任务在调度器进程内线程执行）
 #   - airflow-webserver：Web UI（树状视图 / 日志 / 触发 / 回填）
+#   - superset-init    ：一次性初始化（建 superset_meta + db upgrade + 幂等管理员
+#                        + 导入看板 JSON + 修正只读连接口令）
+#   - superset         ：Web 看板（8088，只读账号查 ADS/受控视图，见 docs/superset_design.md）
 #
-# Airflow 架构决策见 docs/airflow_design.md；Credentials 用环境变量而非
-# Airflow Connections（CLI 本来就只读环境变量，单机 LocalExecutor 任务进程
-# 直接继承容器环境，避免在 UI 里二次保管一份口令）。
+# Airflow 架构决策见 docs/airflow_design.md；Superset 设计见 docs/superset_design.md。
+# Credentials 用环境变量而非 UI Connections（CLI 本来就只读环境变量；Superset 的
+# 业务连接口令由 superset-init 内 fix_database_password.py 从 env 重建并 Fernet 落库）。
 #
-# 镜像 tag 说明：禁止使用 :latest；Dockerfile 锁 apache/airflow:2.10.5-python3.11。
-# 中国大陆拉取先走镜像源再打回标准名（见 Dockerfile / airflow_design.md）。
+# 镜像 tag 说明：禁止使用 :latest；Airflow 锁 apache/airflow:2.10.5-python3.11，
+# Superset 锁 apache/superset:4.1.2（缺失 MySQL 驱动用最小 Dockerfile 补 pymysql）。
+# 中国大陆拉取先走镜像源再打回标准名（见各 Dockerfile / 设计文档）。
 # ==================================================================
 
 name: ecommerce-data-platform
@@ -56,6 +61,46 @@ x-airflow-common: &airflow-common
     - ./logs:/opt/ecommerce_dw/logs
     - ./.env:/opt/ecommerce_dw/.env:ro
     - airflow_logs:/opt/airflow/logs
+  networks:
+    - ecommerce-net
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+x-superset-common: &superset-common
+  image: ecommerce-superset:4.1.2
+  build:
+    context: .
+    dockerfile: docker/superset/Dockerfile
+  restart: "no"
+  environment: &superset-env
+    # 元数据库 = postgres 容器上的独立库 superset_meta（非 Airflow 的 meta 库）
+    SUPERSET_META_DB_URI: postgresql+psycopg2://${SUPERSET_META_USER}:${SUPERSET_META_PASSWORD}@postgres:5432/${SUPERSET_META_DB}
+    SUPERSET_META_DB: ${SUPERSET_META_DB}
+    SUPERSET_META_USER: ${SUPERSET_META_USER}
+    SUPERSET_META_PASSWORD: ${SUPERSET_META_PASSWORD}
+    SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+    # superset-init 幂等创建管理员
+    SUPERSET_ADMIN_USERNAME: ${SUPERSET_ADMIN_USERNAME}
+    SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
+    SUPERSET_ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL}
+    # init.sh Step 1 以 postgres 超管建库/建角色
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    POSTGRES_DB: ${POSTGRES_DB}
+    # 业务数仓只读账号（Superset 不直连 ecom_app）
+    MYSQL_RO_USER: ${MYSQL_RO_USER}
+    MYSQL_RO_PASSWORD: ${MYSQL_RO_PASSWORD}
+    MYSQL_DATABASE: ${MYSQL_DATABASE}
+    SUPERSET_MYSQL_HOST: mysql
+    SUPERSET_MYSQL_PORT: "3306"
+    TZ: UTC
+  volumes:
+    - ./docker/superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    - ./docker/superset/init.sh:/app/scripts/init.sh:ro
+    - ./docker/superset/fix_database_password.py:/app/scripts/fix_database_password.py:ro
+    - ./dashboards/exports:/opt/superset/exports:ro
+    - superset_home:/app/superset_home
   networks:
     - ecommerce-net
   depends_on:
@@ -142,10 +187,42 @@ services:
       retries: 12
       start_period: 30s
 
+  # 一次性初始化：建 superset_meta 库 + db upgrade + 幂等管理员 + 导入看板 JSON +
+  # 修正只读连接口令。退出码 0 即完成；可重复执行（幂等）。空元库一键重建命令：
+  #   docker compose up -d --force-recreate superset-init && docker compose up -d superset
+  superset-init:
+    <<: *superset-common
+    container_name: ecommerce-superset-init
+    restart: "no"
+    command: ["bash", "/app/scripts/init.sh"]
+
+  superset:
+    <<: *superset-common
+    container_name: ecommerce-superset
+    restart: unless-stopped
+    command: ["/usr/bin/run-server.sh"]
+    ports:
+      - "${SUPERSET_UI_PORT:-8088}:8088"
+    # 基础镜像不保证有 curl/wget，用 python urllib 探测 /health（返回 200）
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8088/health',timeout=5)\""]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 45s
+    depends_on:
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      superset-init:
+        condition: service_completed_successfully
+
 volumes:
   mysql_data:
   postgres_data:
   airflow_logs:
+  superset_home:
 
 networks:
   ecommerce-net:

@@ -2,7 +2,7 @@
 
 电商用户行为数据仓库与实时分析平台。
 
-**阶段进度：Phase 1（数据探索与契约）、Phase 2（ODS 贴源入库）、Phase 3（DWD 明细标准化）、Phase 4（DWS 汇总建模 + ADS 指标应用）、Phase 5（增量处理 + 质量门禁）、Phase 6（Airflow 编排）均已完成**（见「当前状态」）。尚未实现 Superset 看板或实时链路。
+**阶段进度：Phase 1（数据探索与契约）、Phase 2（ODS 贴源入库）、Phase 3（DWD 明细标准化）、Phase 4（DWS 汇总建模 + ADS 指标应用）、Phase 5（增量处理 + 质量门禁）、Phase 6（Airflow 编排）、Phase 7（Superset 看板）均已完成**（见「当前状态」）。尚未实现实时链路。
 
 目标形态（后续 Phase）：Retailrocket 用户行为数据 → MySQL 四层数仓（ODS / DWD / DWS / ADS）→ Airflow 编排 → Superset 看板；之后扩展 Kafka + Flink 实时链路。
 
@@ -60,6 +60,17 @@
   build_ads 复核 ALL MATCH、门禁 PASS 60/60 / 76.5M 行 235s）、重跑业务行数不变；
   `phase6_retry_demo` 演示失败→自动重试→成功。设计/参数/回填手册/故障排查/
   全部实测证据见 `docs/airflow_design.md`。
+- **Phase 7 ✅ 已完成**：Superset 看板——镜像锁 `apache/superset:4.1.2`
+  （最小 Dockerfile 补 `pymysql` + `psycopg2-binary`），元数据落在 PostgreSQL
+  独立库 `superset_meta`（与 Airflow 的 `meta` 物理隔离）；业务连接用独立只读账号
+  `superset_ro`（仅 SELECT 4 张 ADS 应用表 + 5 张受控视图，**不直连 `ecom_app`**，
+  控制表 `ads_publish_log` 不开放，新鲜度走 `v_ads_publish_status` 视图）。
+  一个 `superset-init` 容器从空元库一键重建（建库 → `db upgrade` → 幂等 admin →
+  `import-dashboards` 导入看板 JSON → 修正连接口令）。**三个看板 21 张图**：
+  运营总览（11）/ 用户行为（5）/ 商品分析（5），各含口径说明 panel；原生筛选器
+  （日期、转化口径、类目）before/after 与发布刷新（`publish --run 5`）均有真浏览器
+  截图证据；5 项关键指标与直连 SQL 复核 **ALL MATCH**。设计/口径/全部实测证据见
+  `docs/superset_design.md`，声明式生成脚本 `scripts/superset_setup.py`。
 - 可复用流式统计模块在 `src/ecommerce_dw/eda/`（无数据库、只读本地 CSV）。
 - 工程骨架 + 两个数据库的容器编排文件（`docker-compose.yml`）。
 - 容器运行时为 **WSL2 内的 Docker Engine**（Windows 侧无 `docker` 命令，见「已验证环境」）；MySQL / PostgreSQL 容器已实际启动并通过健康检查。
@@ -201,6 +212,19 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
   --conf '{"from": "2015-09-16", "to": "2015-09-17"}'
 ```
 
+### Phase 7 Superset 看板
+
+- **设计文档**：`docs/superset_design.md`（部署拓扑 / 只读访问控制 /
+  `superset_meta` 元库隔离 / 可复现部署 / 口径 / 筛选器 / 刷新与新鲜度 / 验收证据）。
+- **声明式生成**：`python scripts/superset_setup.py`（Windows venv 对生效实例
+  upsert 数据库/数据集/图表/看板并导出看板包）。
+- **只读账号与受控视图**：`python scripts/apply_superset_grants.py`（幂等，
+  建 5 个受控视图 + `superset_ro` 授权并打印 `SHOW GRANTS`）。
+- **验收脚本**：`superset_evidence.py`（指标一致性）、`superset_ui_evidence.py`
+  （筛选器 before/after）、`superset_screenshots.py`（真实渲染截图）。
+- **产物**：`dashboards/exports/`（可重建看板包）、`dashboards/screenshots/`（6 张 PNG）。
+- **日常访问**：`http://localhost:8088`（admin）。
+
 ## Docker（数据库）启停
 
 > 前提：容器运行时已就绪。本机经实际验证的是 **WSL2 内的 Docker Engine 29.9.3**
@@ -280,6 +304,14 @@ python scripts/check_db_health.py
   `ecommerce_daily_pipeline`（schedule `0 4 * * *`）；手动小窗口回填十任务全
   success、同区间幂等复跑业务行数不变、`phase6_retry_demo` 失败后自动重试成功
   （证据见 `docs/airflow_design.md` §9）。
+- **Superset（Phase 7）**：`ecommerce-superset:4.1.2` 镜像构建成功
+  （base `apache/superset:4.1.2` 经 `docker.1ms.run` 拉取后 tag 回标准名，
+  最小 Dockerfile 补 `pymysql` + `psycopg2-binary`）；`superset-init` 退出码 0、
+  `superset` 容器 `healthy`、`superset version` = `4.1.2`；元库
+  `superset_meta` 建在 PostgreSQL（与 `meta` 隔离）；业务库只读账号
+  `superset_ro` SHOW GRANTS = 4 张 ADS 表 + 5 张受控视图全 SELECT、无任何写权限；
+  三个看板 dashboard_slices = 11 / 5 / 5，导入幂等复跑数量不变，5 项关键指标
+  ALL MATCH，筛选器与刷新截图 6 张（证据见 `docs/superset_design.md` §9）。
 
 ## 目录结构
 
@@ -299,7 +331,9 @@ ecommerce-data-platform/
 ├─ sql/{ddl,dml,checks}/  # 数仓建模 SQL（含 Phase 5 控制表 etl_watermark / quality_check_run / quality_check_result / ads_publish_log）
 ├─ airflow/dags/          # Phase 6：Airflow DAG（ecommerce_daily_pipeline + retry demo）
 ├─ streaming/             # Kafka + Flink 实时链路（后续 Phase）
-├─ dashboards/exports/    # 看板与导出（后续 Phase）
+├─ dashboards/            # Phase 7：看板产物
+│  ├─ exports/            #   可重建看板包（含 charts/datasets/databases/metadata）
+│  └─ screenshots/        #   真实渲染截图（默认/筛选/刷新前后共 6 张）
 ├─ tests/                 # 冒烟/单元/集成/数据质量测试
 ├─ docs/                  # 架构文档
 ├─ docker/mysql/init/     # MySQL 初始化 SQL
@@ -318,8 +352,11 @@ ecommerce-data-platform/
   `verify` ALL MATCH，见 `docs/dws_ads_design.md` §8）；Phase 5 增量与 60 条质量门禁
   实测通过（见 `docs/incremental_and_quality.md` §9，含崩溃恢复实证）；下次启动前先
   `docker compose up -d` 并等待 MySQL 健康。
-- `docs/architecture.md` 中包含完整 Roadmap；下一阶段为「Phase 7：Superset 看板」
-  （Superset 只读 ADS 层输出 / 受控视图，不直接读取 DWD 明细）。
+- `docs/architecture.md` 中包含完整 Roadmap；下一阶段为「Phase 8：测试、性能与交付
+  （V1.0）」——在 Phase 1~7 全部就绪的基础上做系统性验收与性能压测后再交付。
+- Phase 7 备注：本机 Superset 图表查询在筛选器 APPLY 触发 12 图并发重查时较慢
+  （WSL2 环境 CPU/网络波动，单查询本身毫秒级、SQL 均走索引），已在前端证据脚本中
+  做「等待收敛 + 超时重试」处理，不影响验收结论。
 
 ## 安全说明
 
