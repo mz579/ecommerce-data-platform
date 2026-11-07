@@ -21,6 +21,7 @@ from ecommerce_dw.streaming.verify_rt import (
     ratio,
     read_realtime,
     reconcile,
+    rt_recon_credentials,
     summarize,
 )
 
@@ -64,6 +65,26 @@ def test_build_expected_sql_is_independent_and_parameterised():
 def test_ratio_zero_denominator_is_null():
     assert ratio(0, 0) is None
     assert ratio(3, 0) is None
+
+
+def test_rt_recon_credentials_default_to_readonly_account():
+    assert rt_recon_credentials({"RT_RECON_RO_PASSWORD": "secret"}) == (
+        "rt_recon_ro",
+        "secret",
+    )
+
+
+def test_rt_recon_credentials_honour_overrides():
+    environ = {
+        "RT_RECON_RO_USER": "recon_reader",
+        "RT_RECON_RO_PASSWORD": "secret",
+    }
+    assert rt_recon_credentials(environ) == ("recon_reader", "secret")
+
+
+def test_rt_recon_credentials_do_not_fall_back_to_rt_app():
+    with pytest.raises(KeyError, match="RT_RECON_RO_PASSWORD"):
+        rt_recon_credentials({"RT_APP_PASSWORD": "app-secret"})
 
 
 def test_ratio_rounds_half_up_to_six_places():

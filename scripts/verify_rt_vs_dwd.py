@@ -2,8 +2,9 @@
 
 Independent of the Flink job's aggregation code: expected values come from a single
 batch SQL query over ``ecommerce_dw.dwd_events``; actual values are read from the three
-RT tables. Exit code 0 = every metric MATCH, 1 = at least one DIFF/missing row,
-2 = configuration/usage error.
+RT tables with the read-only ``rt_recon_ro`` account (``RT_RECON_RO_USER`` /
+``RT_RECON_RO_PASSWORD``), never ``rt_app``. Exit code 0 = every metric MATCH,
+1 = at least one DIFF/missing row, 2 = configuration/usage error.
 
 Usage (project root, venv active):
 
@@ -28,6 +29,7 @@ from ecommerce_dw.streaming.verify_rt import (
     read_expected,
     read_realtime,
     reconcile,
+    rt_recon_credentials,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -57,11 +59,12 @@ def _connect_dwd(database: str) -> pymysql.connections.Connection:
 
 
 def _connect_rt(database: str) -> pymysql.connections.Connection:
+    user, password = rt_recon_credentials(os.environ)
     return pymysql.connect(
         host=os.environ.get("RT_MYSQL_HOST") or os.environ["MYSQL_HOST"],
         port=int(os.environ.get("RT_MYSQL_PORT") or os.environ.get("MYSQL_PORT", "3306")),
-        user=os.environ.get("RT_APP_USER", "rt_app"),
-        password=os.environ["RT_APP_PASSWORD"],
+        user=user,
+        password=password,
         database=database,
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,

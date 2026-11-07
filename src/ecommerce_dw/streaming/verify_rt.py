@@ -89,6 +89,20 @@ def build_expected_sql() -> str:
     return EXPECTED_SQL
 
 
+def rt_recon_credentials(environ: Mapping[str, str]) -> tuple[str, str]:
+    """Resolve the read-only RT reconciliation account.
+
+    Reconciliation must never use ``rt_app`` (that account has DML rights). The
+    dedicated ``rt_recon_ro`` account is read-only on ``ecommerce_rt.*`` and the
+    seven ``ecommerce_dw.ads_*`` tables (Phase 9.2).
+    """
+    user = environ.get("RT_RECON_RO_USER") or "rt_recon_ro"
+    password = environ.get("RT_RECON_RO_PASSWORD")
+    if not password:
+        raise KeyError("RT_RECON_RO_PASSWORD")
+    return user, password
+
+
 def expected_sql_params(date_from: date, date_to: date) -> tuple[date, date, date, date]:
     return (date_from, date_to, date_from, date_to)
 

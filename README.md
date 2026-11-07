@@ -277,7 +277,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| 宿主全量测试 | `python -m pytest` | **233 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
+| 宿主全量测试 | `python -m pytest` | **236 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
 | DAG 契约测试 | `docker compose exec -T airflow-scheduler python -m pytest tests/dag` | **5 passed** |
 | 代码规范 | `ruff check . && ruff format --check .` | 全绿 |
 | 一键端到端演示 | `python scripts/demo_phase8.py` | 8 步通过，约 **4.2s**，生产 13 张表行数不变 |
@@ -290,7 +290,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 | Phase 9.2 消费校验/DLQ | `scripts/consume_validate.py --from-beginning` | 第 2 轮 53,736 条全合法、0 非法、distinct `event_id` 26,868；DLQ 演练仅测试 topic |
 | Phase 9.3 Java 自检 | `bash scripts/build_flink_job.sh` | **42 passed / 0 failed**，jar 37,024 bytes |
 | Phase 9.3 实时回放 | `scripts/replay_to_kafka.py --from 2015-07-15 --to 2015-07-17 --rate 2000` | **65,940** 条，0 失败，32.98 s，**1,999.2 msg/s** |
-| Phase 9.3 批流对账 | `python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16` | **39/39 MATCH**（3 天 × 13 指标），`VERIFY_RT_VS_DWD_OK` |
+| Phase 9.3 批流对账 | `python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16`（只读 `rt_recon_ro`） | **39/39 MATCH**（3 天 × 13 指标），`VERIFY_RT_VS_DWD_OK` |
 | Phase 9.3 恢复演练 | `flink cancel` → `flink run -d -s <chk-1>` | `restored:1`，续读位点非 0，恢复后对账仍 39/39 MATCH |
 
 测试矩阵与手算基线见 `docs/test_matrix.md`；性能优化与 EXPLAIN 见 `docs/performance.md`。
@@ -312,7 +312,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 - `.env`、`config/config.yaml`、`data/` 均被 `.gitignore` 忽略；**仓库内没有任何真实口令**。
 - DAG 源码不持有凭据；Airflow 任务从 compose 注入的 `MYSQL_*` / `POSTGRES_*` 环境变量取连接信息。
 - Superset 业务连接使用独立只读账号 `superset_ro`，权限仅 `SELECT` 6 张 ADS 表 + 5 个受控视图；控制表 `ads_publish_log` 不开放，新鲜度通过 `v_ads_publish_status` 视图暴露。
-- Phase 9.2 实时账号独立：`rt_app` 仅 `ecommerce_rt.*` 的 SELECT/INSERT/UPDATE/DELETE；`rt_recon_ro` 仅 `ecommerce_rt.*` + `ecommerce_dw.ads_*` 只读；应用账号无 `ecommerce_dw` 任何权限。
+- Phase 9.2 实时账号独立：`rt_app` 仅 `ecommerce_rt.*` 的 SELECT/INSERT/UPDATE/DELETE；`rt_recon_ro` 仅 `ecommerce_rt.*` + `ecommerce_dw.ads_*` 只读；应用账号无 `ecommerce_dw` 任何权限。Phase 9.3 对账固定使用 `rt_recon_ro`，不使用 `rt_app`。
 - Airflow 元库 `meta` 与 Superset 元库 `superset_meta` 物理隔离，分别使用不同角色；业务库 `ecommerce_dw` 与元数据库不同引擎、不同实例、不同凭据。
 - 本地 `.env` 使用弱口令仅用于开发；生产必须改用密钥管理（Vault/KMS/云 Secrets），并限制 3306/5432/8080/8088 的访问来源。
 - 数据集许可 **CC BY-NC-SA 4.0**（非商业、署名、相同方式共享），商用需另行确认授权，见 `docs/dataset.md` §6。
@@ -366,8 +366,12 @@ bash scripts/build_flink_job.sh              # javac --release 17 + 42 项自检
 docker compose build flink-jobmanager flink-taskmanager
 docker compose up -d --force-recreate flink-jobmanager flink-taskmanager
 bash scripts/deploy_flink_job.sh             # 提交作业并打印 JobID
-python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16
+python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16  # 只读账号 rt_recon_ro
 ```
+
+对账脚本使用 `RT_RECON_RO_USER`（默认 `rt_recon_ro`）/ `RT_RECON_RO_PASSWORD` 连接
+`ecommerce_rt`，并在会话内设置 `READ ONLY`；不会使用有 DML 权限的 `rt_app`。
+`RT_RECON_RO_PASSWORD` 只放在本地 `.env`。
 
 **未实现（后续可选）**：商品 Top-N 排行、留存 cohort、监控告警、application 模式/自动恢复、
 实时看板衔接。V1.0 不依赖本扩展。

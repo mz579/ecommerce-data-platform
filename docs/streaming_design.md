@@ -365,7 +365,8 @@ R24 已用官方 `StateMachineExample.jar` 完成一次完整演练，命令与�
 `49724c3286eb95c36b0283d46b34d2aa` 用 `-s chk-1` 恢复，REST 返回 `"restored":1`，
 `external_path` 指向 chk-1；Job2 source 共消费 41,803 条（= 本次回放量）后追平 topic end，
 由此其起始位点等于回放前 end offset `39,832/40,198/39,647`（即 chk-1 位点，记录数 119,676），
-不是 0 也不是 cancel 时的 group offset。完整数据见 §11.3.4。
+不是 0 也不是 cancel 时的 group offset。这 41,803 条全部被恢复的 `event_id` 去重状态吸收
+（seen=deduped=41,803），演练验证的是 offset 续读 + 去重状态避免重复计数；完整数据见 §11.3.4。
 
 > 9.1 的演练证明“cancel 后 checkpoint 仍在 + 可从 checkpoint 恢复”；9.3 进一步验证了
 > 业务作业的 Kafka offset 续读与结果表无重复计数（§11.3.4）。
@@ -389,7 +390,9 @@ R24 已用官方 `StateMachineExample.jar` 完成一次完整演练，命令与�
   **不授予** `ecommerce_dw` 任何权限。DDL 由管理员执行 `scripts/apply_rt_ddl.py`，
   不授予应用账号（见 §11.2 偏差 2）。
 - 对账作业对 `ecommerce_dw.ads_*` 只读；已单独建只读账号 `rt_recon_ro`（复用
-  `superset_ro` 的最小权限思路）。
+  `superset_ro` 的最小权限思路）。9.3 的 `scripts/verify_rt_vs_dwd.py` 固定使用该账号
+  （`RT_RECON_RO_USER` 默认 `rt_recon_ro` / `RT_RECON_RO_PASSWORD`），**不使用**
+  `rt_app`；连接后执行 `SET SESSION TRANSACTION READ ONLY`。
 - 生命周期隔离：实时表可随时 truncate/重建，不影响离线发布与 `ads_publish_log`。
 
 ### 7.2 表结构（9.2 已落地 DDL）
@@ -800,7 +803,7 @@ python scripts/consume_validate.py --from-beginning --idle-timeout 20
 | 项 | 结果 |
 | --- | --- |
 | 生产 13 表基线（验收前后各一次） | 13/13 MATCH；两次输出仅 `checked_at` 不同 |
-| 全量测试 | **216 passed, 1 skipped**（9.2 验收时点；skip 为既有 Airflow DAG 依赖缺失，非 9.2 引入；9.3 完成后为 233 passed, 1 skipped） |
+| 全量测试 | **216 passed, 1 skipped**（9.2 验收时点；skip 为既有 Airflow DAG 依赖缺失，非 9.2 引入；9.3 完成后为 236 passed, 1 skipped） |
 | 9.2 新增测试 | 58 条（56 单元 + 2 Kafka 集成） |
 | `ruff check .` / `ruff format --check .` | 全绿（115 files formatted） |
 
@@ -880,8 +883,8 @@ end offset `17,564/17,990/18,183`）。清空 `ecommerce_rt` 三张指标表后�
 | 消费组 | `ecommerce-rt-flink-v1` 提交 offset `39,832/40,198/39,647`，lag 0 |
 | 结束状态 | `flink cancel` 后 `flink list` → `No running jobs` |
 
-RT 表终态（`rt_traffic_daily`，恢复演练结束后直接查询；指标与主验收一致，
-`source_watermark` 为演练运行的水位线）：
+RT 表终态（`rt_traffic_daily`，验收结束后直接查询；指标与主验收一致，
+`source_watermark` 取各行最后一次写入的水位线（主作业或恢复演练）：
 
 | event_date | pv | uv | dau | is_final | source_watermark |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -900,6 +903,9 @@ python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16
 ```
 
 期望值由 `ecommerce_dw.dwd_events` 单条 CTE SQL 独立算出（§8），实际值从三张 RT 表读取。
+RT 连接固定使用只读账号 `rt_recon_ro`（`RT_RECON_RO_USER` 默认 `rt_recon_ro`，
+口令取 `RT_RECON_RO_PASSWORD`）；脚本不读取 `RT_APP_*`，连接后仍设置
+`SET SESSION TRANSACTION READ ONLY`。
 
 | 日期 | pv | uv | dau | cart | buyer | orders | add_cart | strict | global | items_v/c/b | is_final |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
@@ -926,12 +932,19 @@ python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16
 | Job2 恢复 | `flink run -d -s .../chk-1 ...` → **`49724c3286eb95c36b0283d46b34d2aa`** |
 | restored 证据 | `/jobs/<id>/checkpoints` → `"counts":{"restored":1,...}`，`latest.restored.external_path` = 上述 chk-1 |
 | 续读位点 | Job2 source 共消费 **41,803** 条（= 本次回放量）后追平 topic end；因此其起始位点必然等于回放前的 end offset `39,832/40,198/39,647`（分区 2 low watermark=1，记录数 119,676），**不是 0，也不是 cancel 时 group offset** |
+| Job2 去重 | seen **41,803** / deduped **41,803**：复读的全部 41,803 条均为 backlog 中已存在事件的重复副本，被恢复的 48h `event_id` 去重状态吸收，没有新事件进入窗口 |
 | Job2 运行 | 18 个 COMPLETED checkpoint（另有 1 个部署期瞬时失败，作业保持 RUNNING、无异常栈） |
 | 恢复后对账 | `verify_rt_vs_dwd.py 2015-07-14 2015-07-16` → `matched=39 diff=0`，`VERIFY_RT_VS_DWD_OK` |
 | 收尾 | Job2 cancel；`flink list` → `No running jobs`；chk-1..3 保留 |
 
 > 说明：`_metadata` 为 Flink 二进制格式，未直接解析 offset；续读位点用
 > “topic end − 作业实际消费条数”反推，并与回放前 end offset 精确吻合，作为等价证据。
+>
+> 本演练证明的是 **“checkpoint 的 Kafka offset 续读 + 恢复的去重状态避免重复计数”**：
+> Job2 从 chk-1 位点重新读取 41,803 条，全部被 `event_id` 去重，窗口没有重复累加。
+> 窗口/upsert 的幂等另由主验收的 5 次 sink 写入（3 个日结果，其中 7/14、7/15 各经历
+> 非 final→final 覆盖）与 39/39 对账佐证；主验收的 dedup 只吸收了 9.2 的 26,868 条重复，
+> 其余 92,808 条进入窗口。
 
 #### 11.3.5 非法消息容错（测试 topic，不污染生产）
 
@@ -949,8 +962,8 @@ python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16
 | 项 | 结果 |
 | --- | --- |
 | 生产 13 表基线（验收前后各一次） | **13/13 OK**，两次输出逐行一致 |
-| 全量测试 | **233 passed, 1 skipped in 15.35 s**（skip 为既有 Airflow DAG 依赖缺失） |
-| 9.3 新增测试 | 59 条（Java 自检 42 + 对账单测 17）；9.2 时点全量为 216 |
+| 全量测试 | **236 passed, 1 skipped in 15.33 s**（skip 为既有 Airflow DAG 依赖缺失） |
+| 9.3 新增测试 | 62 条（Java 自检 42 + 对账单测 20）；9.2 时点全量为 216 |
 | `ruff check .` | All checks passed |
 | `ruff format --check .` | 118 files already formatted |
 
@@ -968,6 +981,7 @@ python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16
 | 8 | **session 集群**：作业不随 JM 重启自动恢复，仍需手工 `flink run -s`（§6.5、§12）。 |
 | 9 | **校验范围**：Java 解析器校验 `schema_version`、必填字段/类型、UTC 时间、事件枚举、visitor/item/transaction 约束与 `event_id` 格式，不加载完整 `event_v1` JSON Schema；完整 schema 校验仍由 9.2 的 Python 消费者承担。 |
 | 10 | **KafkaSource 提示**：启动日志提示 `commit.offsets.on.checkpoint` 由 Flink 管理、未透传给 consumer；实测 checkpoint 后 group offset 正常推进并最终 lag=0，无功能影响。 |
+| 11 | **恢复演练未注入“checkpoint 之后首次出现的新事件”**：Job2 复读的 41,803 条全部被 `event_id` 去重（deduped=41,803），没有新事件进入窗口；该场景按 at-least-once + 确定性 `event_id` 设计应正常处理，但未单独实测，建议后续补一条 checkpoint 后新 event_id 的演练。 |
 
 ## 12. 风险与后续
 
