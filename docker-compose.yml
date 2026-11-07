@@ -109,6 +109,38 @@ x-superset-common: &superset-common
     postgres:
       condition: service_healthy
 
+x-flink-common: &flink-common
+  image: ecommerce-flink:1.20.1-scala_2.12-java17
+  build:
+    context: .
+    dockerfile: docker/flink/Dockerfile
+  restart: unless-stopped
+  environment: &flink-env
+    # 集群级配置。单机回放规模下：JM 768m / TM 1280m 进程内存，2 个 slot。
+    # 具体上限依据 WSL2 实测见 docs/streaming_design.md §10.4。
+    FLINK_PROPERTIES: |
+      jobmanager.rpc.address: flink-jobmanager
+      jobmanager.memory.process.size: 768m
+      taskmanager.memory.process.size: 1280m
+      taskmanager.numberOfTaskSlots: 2
+      parallelism.default: 2
+      rest.address: 0.0.0.0
+      rest.bind-address: 0.0.0.0
+      state.backend.type: hashmap
+      state.checkpoints.dir: file:///opt/flink/checkpoints
+      state.savepoints.dir: file:///opt/flink/savepoints
+      state.checkpoints.num-retained: 3
+      execution.checkpointing.interval: 10s
+      execution.checkpointing.mode: EXACTLY_ONCE
+      execution.checkpointing.min-pause: 5s
+      execution.checkpointing.timeout: 60s
+    TZ: UTC
+  volumes:
+    - flink_checkpoints:/opt/flink/checkpoints
+    - flink_savepoints:/opt/flink/savepoints
+  networks:
+    - ecommerce-net
+
 services:
   mysql:
     image: mysql:8.0.43
@@ -237,11 +269,103 @@ services:
       superset-init:
         condition: service_completed_successfully
 
+  # ==================================================================
+  # Phase 9.1：实时基础设施（Kafka KRaft 单节点 + Flink standalone session）
+  #
+  # - 不依赖、不修改现有 MySQL/PostgreSQL/Airflow/Superset 五服务；
+  # - Kafka 仅单节点 KRaft（无 ZooKeeper），内外部双 listener：
+  #     容器内（Flink/后续作业）  kafka:9092
+  #     宿主机控制台/调试        localhost:${KAFKA_PORT:-9092} -> 容器 19092
+  # - Flink 采用 standalone session（JM + 1 TM），作业用 `flink run` 提交，
+  #   不在 compose 里长驻业务作业；checkpoint/savepoint 落命名卷。
+  # 设计、容量与验收见 docs/streaming_design.md。
+  # ==================================================================
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: ecommerce-kafka
+    restart: unless-stopped
+    mem_limit: 1g
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:${KAFKA_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      # 仅开发/回放环境；生产集群应放入独立 secret 管理
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-5L6g3nShT-eMCtK--X86sw}
+      # 堆上限由 WSL2 资源实测决定（见设计文档 §10.4），非拍脑袋值
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+      TZ: UTC
+    ports:
+      - "${KAFKA_PORT:-9092}:19092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 30s
+    networks:
+      - ecommerce-net
+
+  flink-jobmanager:
+    <<: *flink-common
+    container_name: ecommerce-flink-jobmanager
+    command: ["jobmanager"]
+    mem_limit: 1g
+    ports:
+      - "${FLINK_UI_PORT:-8081}:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/overview >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
+
+  flink-taskmanager:
+    <<: *flink-common
+    container_name: ecommerce-flink-taskmanager
+    command: ["taskmanager"]
+    mem_limit: 1536m
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pgrep -f org.apache.flink.runtime.taskexecutor.TaskExecutor >/dev/null",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
 volumes:
   mysql_data:
   postgres_data:
   airflow_logs:
   superset_home:
+  kafka_data:
+  flink_checkpoints:
+  flink_savepoints:
 
 networks:
   ecommerce-net:

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ecommerce-data-platform.local/schemas/event_v1.json",
+  "title": "EcommerceEventV1",
+  "description": "Phase 9 Kafka 消息契约 v1。event_time 为业务事件时间（2015 快照），ingest_time 为回放器注入时间；两者均为 UTC ISO-8601。",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "event_id",
+    "event_time",
+    "ingest_time",
+    "schema_version",
+    "visitor_id",
+    "event_type",
+    "item_id",
+    "transaction_id"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$",
+      "description": "确定性事件 ID；生产回放器用 DWD dedup_key 同款 SHA-256（64 hex），重复回放不会重复计数。"
+    },
+    "event_time": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "description": "业务事件时间（UTC，毫秒精度），Flink event time 与窗口依据。"
+    },
+    "ingest_time": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "description": "回放器写入 Kafka 的时间（UTC）；只用于回放延迟监控，不参与窗口。"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "契约主版本；v1 固定为 1。不兼容变更递增并切新 topic。"
+    },
+    "visitor_id": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "访客 ID；原始 visitorid=0 的哨兵行置 null，并带 quality_flags=[\"visitor_zero\"]。"
+    },
+    "event_type": {
+      "type": "string",
+      "enum": ["view", "add_to_cart", "transaction"],
+      "description": "DWD 标准枚举；原始 addtocart 由 raw_event_type 保真。"
+    },
+    "item_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "商品 ID，必填。"
+    },
+    "transaction_id": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "订单级标识；event_type=transaction 时必填，其余事件必须为 null。"
+    },
+    "raw_event_type": {
+      "type": "string",
+      "description": "可选：原始事件字符串（view/addtocart/transaction），用于血缘。"
+    },
+    "source_file": {
+      "type": "string",
+      "description": "可选：来源 CSV basename。"
+    },
+    "source_row_number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "可选：来源 CSV 物理行号（表头=1）。"
+    },
+    "quality_flags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "可选：行级质量标记，正常为空数组；visitor_zero 等。"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "event_type": { "const": "transaction" } },
+        "required": ["event_type"]
+      },
+      "then": {
+        "properties": { "transaction_id": { "type": "integer", "minimum": 1 } }
+      },
+      "else": {
+        "properties": { "transaction_id": { "type": "null" } }
+      }
+    }
+  ]
+}
