@@ -2,7 +2,7 @@
 
 **基于 Retailrocket 电商行为数据的四层数据仓库与看板平台（V1.0）**：把约 1 GB 原始 CSV 建设为 MySQL 四层数仓（ODS → DWD → DWS → ADS），由 Airflow 每日编排增量构建与 60 条硬质量门禁，Superset 提供三个只读业务看板。
 
-**阶段状态：Phase 1–8 全部完成，V1.0 已交付。** 下一阶段为 **Phase 9：Kafka + Flink 实时扩展（可选）**，当前仓库**尚未实现**实时链路。
+**阶段状态：Phase 1–8 全部完成，V1.0 已交付；Phase 9.1–9.2 已完成。** Phase 9 为可选的 Kafka + Flink 实时扩展：已完成 Kafka/Flink 基础设施、`event_v1` 消息契约、DWD 回放器、schema 校验/DLQ 消费者，以及 `ecommerce_rt` 5 张结果表与最小权限账号；Flink 实时业务作业尚未实现。
 
 ---
 
@@ -132,7 +132,7 @@ ecommerce-data-platform/
 ├─ docs/                    # 架构、口径、设计与运维文档
 ├─ notebooks/01_eda.ipynb   # Phase 1 全量 EDA（已执行）
 ├─ scripts/                 # DDL 应用、ODS 批量装载、健康检查、演示、Superset 生成/验收
-├─ sql/ddl/                 # ODS/DWD/DWS/ADS/控制表 DDL + ads_views/ 受控视图
+├─ sql/ddl/                 # ODS/DWD/DWS/ADS/控制表 DDL + ads_views/ 受控视图 + streaming/（rt_* 5 表）
 ├─ src/ecommerce_dw/
 │  ├─ eda/                  # 无库流式统计
 │  ├─ ingestion/            # ODS 分块幂等装载（断点续跑）
@@ -141,8 +141,9 @@ ecommerce-data-platform/
 │  ├─ incremental/          # 水位线、迟到窗口、回填规划
 │  ├─ quality/              # 60 条规则、硬门禁、发布作用域守卫
 │  ├─ ops/                  # Airflow 控制面（窗口/校验/批次登记）
+│  ├─ streaming/            # Phase 9：event_v1 构造/校验、DWD 回放器、DLQ 消费者、RT DDL/授权
 │  └─ cli.py                # 统一入口 incremental / quality / publish / verify / status
-├─ streaming/               # Phase 9 预留（当前为空骨架）
+├─ streaming/               # Phase 9：event_v1 JSON Schema 与 Flink SQL 预留目录
 ├─ tests/                   # 单元 / 集成 / E2E / DAG 契约
 ├─ docker-compose.yml       # 生产栈
 ├─ docker-compose.fresh.yml # 全新环境 overlay（独立容器名/卷）
@@ -276,7 +277,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| 宿主全量测试 | `python -m pytest` | **158 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
+| 宿主全量测试 | `python -m pytest` | **216 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
 | DAG 契约测试 | `docker compose exec -T airflow-scheduler python -m pytest tests/dag` | **5 passed** |
 | 代码规范 | `ruff check . && ruff format --check .` | 全绿 |
 | 一键端到端演示 | `python scripts/demo_phase8.py` | 8 步通过，约 **4.2s**，生产 13 张表行数不变 |
@@ -285,12 +286,14 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 | Superset 指标一致性 | `python scripts/superset_evidence.py` | 5 项关键指标 **ALL MATCH** |
 | Superset UI 验收 | `python scripts/superset_ui_evidence.py` | 8 张截图，硬断言通过 |
 | 全新环境 | `docker-compose.fresh.yml` + 独立 env | 独立项目/端口/卷起栈、3 看板 15 数据集、只读 smoke 查询通过 |
+| Phase 9.2 实时回放 | `scripts/replay_to_kafka.py --from 2015-07-14 --rate 5000` | 两轮各 **26,868** 条，0 schema 错误，约 **4,985 msg/s** |
+| Phase 9.2 消费校验/DLQ | `scripts/consume_validate.py --from-beginning` | 第 2 轮 53,736 条全合法、0 非法、distinct `event_id` 26,868；DLQ 演练仅测试 topic |
 
 测试矩阵与手算基线见 `docs/test_matrix.md`；性能优化与 EXPLAIN 见 `docs/performance.md`。
 
 ## 9. 已知限制
 
-- **批处理，非实时**：当前只有 Airflow 日调度 + 手工回填；Kafka + Flink 留给 Phase 9（可选），`streaming/` 目前只是占位。
+- **离线批处理仍是主链路，实时仅有基础设施与回放验证**：Phase 9.1/9.2 已落地 Kafka/Flink session 集群、回放器、schema 校验/DLQ 与 `ecommerce_rt` 表结构；尚未实现 Flink 窗口聚合与实时写库，实时结果表当前为空。
 - **数据是 2015 年历史快照**：Retailrocket 数据集静态、无持续新增；增量的“新尾巴”在本仓库靠重放/样例模拟，不是真实在线流量。
 - **匿名访客口径**：`visitorid` 是 Cookie 级匿名标识，不是注册用户；Cookie 清理会高估 UV/留存。`visitorid=0` 的 3 行作为未知访客桶，计入 PV、不计入去重用户。
 - **首末日是部分日**：2015-05-03 自 03:00 UTC 起、2015-09-18 至 02:59 UTC 止；ADS 用 `is_full_day=0` 标记，留存末尾 cohort 用 `window_status='partial'`，不得当完整率使用。
@@ -305,6 +308,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 - `.env`、`config/config.yaml`、`data/` 均被 `.gitignore` 忽略；**仓库内没有任何真实口令**。
 - DAG 源码不持有凭据；Airflow 任务从 compose 注入的 `MYSQL_*` / `POSTGRES_*` 环境变量取连接信息。
 - Superset 业务连接使用独立只读账号 `superset_ro`，权限仅 `SELECT` 6 张 ADS 表 + 5 个受控视图；控制表 `ads_publish_log` 不开放，新鲜度通过 `v_ads_publish_status` 视图暴露。
+- Phase 9.2 实时账号独立：`rt_app` 仅 `ecommerce_rt.*` 的 SELECT/INSERT/UPDATE/DELETE；`rt_recon_ro` 仅 `ecommerce_rt.*` + `ecommerce_dw.ads_*` 只读；应用账号无 `ecommerce_dw` 任何权限。
 - Airflow 元库 `meta` 与 Superset 元库 `superset_meta` 物理隔离，分别使用不同角色；业务库 `ecommerce_dw` 与元数据库不同引擎、不同实例、不同凭据。
 - 本地 `.env` 使用弱口令仅用于开发；生产必须改用密钥管理（Vault/KMS/云 Secrets），并限制 3306/5432/8080/8088 的访问来源。
 - 数据集许可 **CC BY-NC-SA 4.0**（非商业、署名、相同方式共享），商用需另行确认授权，见 `docs/dataset.md` §6。
@@ -329,6 +333,16 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 | `docs/performance.md` | Phase 8 性能优化、EXPLAIN、索引决策、全新环境验证 |
 | `docs/test_matrix.md` | 测试矩阵、手算样例、DAG 契约测试、已知边界 |
 
-## 12. 下一阶段：Phase 9（可选）
+## 12. Phase 9：实时扩展进展（可选）
 
-**Kafka + Flink 实时扩展**：在现有批处理数仓之上增加点击/加购实时指标链路（`streaming/` 落地），实时结果与 ADS 批量结果对账，不改变现有 ODS→DWD→DWS→ADS 的离线主链路。该阶段为可选项，V1.0 不依赖它。
+**9.1 基础设施与契约（已完成）**：Kafka 3.9.1 KRaft 单节点、Flink 1.20.1 session 集群、
+`ecommerce.events.v1` / `.dlq` topic、`event_v1` JSON Schema、`ecommerce_rt` 空库；
+checkpoint 取消保留与恢复演练通过。
+
+**9.2 回放与校验（已完成）**：只读回放 `dwd_events` 到生产 topic（确定性 `event_id`、
+幂等 producer、有界重试与失败 spool）、schema 校验消费者与 DLQ、`ecommerce_rt` 5 张结果表 DDL、
+`rt_app` / `rt_recon_ro` 最小权限账号。2026-11-07 对 2015-07-14（26,868 事件）完成两轮回放：
+0 schema 错误，重复回放后 distinct `event_id` 保持 26,868；生产 13 表基线验收前后一致。
+详见 `docs/streaming_design.md` §11.2。
+
+**尚未实现**：Flink 日窗口聚合、去重状态、JDBC upsert 与批流对账。V1.0 不依赖本扩展。

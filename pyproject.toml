@@ -9,6 +9,9 @@ dependencies = [
     "pymysql",
     "psycopg[binary]",
     "python-dotenv",
+    "confluent-kafka>=2.16.1",
+    "jsonschema>=4.26.0",
+    "rfc3339-validator>=0.1.4",
 ]
 
 [project.optional-dependencies]

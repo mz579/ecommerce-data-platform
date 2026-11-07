@@ -1,7 +1,9 @@
-# Kafka + Flink 实时链路设计（Phase 9.1 · 基础设施与契约先行）
+# Kafka + Flink 实时链路设计（Phase 9.1–9.2 · 基础设施、回放与校验）
 
-> 状态：**9.1 已完成**（2026-11-07）。本阶段只交付可运行的实时基础设施骨架与契约/设计，
-> **不实现业务窗口聚合、回放器业务逻辑与实时结果表 DDL**（留给 9.2 / 9.3）。
+> 状态：**9.1 / 9.2 已完成**（2026-11-07）。9.1 交付 Kafka/Flink 基础设施与消息契约；
+> 9.2 交付 DWD 回放器、schema 校验/DLQ 消费者、`ecommerce_rt` 5 张结果表 DDL 与最小权限账号，
+> 并完成两轮真实回放验收（0 schema 错误，重复可被 `event_id` 吸收）。
+> **Flink 业务窗口聚合与实时结果写入仍未实现**（留给 9.3）。
 >
 > 上游事实基线：生产库 `ecommerce_dw` 的 13 张表行数复核不变（见 §10），
 > ODS 2,756,101 / DWD 2,755,641 / DWS+ADS 9 表 / `ads_publish_log` 12。
@@ -34,9 +36,9 @@
 
 ### 1.2 非目标（本阶段明确不做）
 
-- 不实现 Flink 业务作业（PV/UV/漏斗窗口、维表关联、JDBC sink）。
-- 不实现回放器业务逻辑（读取 CSV、生成 `event_id`、节流发送）。
-- 不建实时结果表（只建空库 `ecommerce_rt`），不写任何实时数据。
+- 不实现 Flink 业务作业（PV/UV/漏斗窗口、维表关联、JDBC sink）——9.3。
+- ~~不实现回放器业务逻辑~~：9.2 已实现回放器，数据源为 `dwd_events`（见 §11.2 偏差 1）。
+- ~~不建实时结果表~~：9.2 已建 5 张表；本阶段仍**不写任何实时数据**（Flink 作业未实现）。
 - 不改 ODS/DWD/DWS/ADS 生产表、不改 Airflow DAG、不改 Superset 看板。
 - 不把实时链路接入生产流量；Retailrocket 是静态快照，实时链路是**回放验证**，不是线上流量。
 
@@ -49,10 +51,10 @@
 
 ```mermaid
 flowchart LR
-    subgraph REPLAY["回放器（9.2 实现，宿主/WSL）"]
-        CSV["data/raw/retailrocket/events.csv<br/>2015 静态快照"]
-        RP["回放器<br/>event_id = SHA-256(dedup key)<br/>按 event_time 节流"]
-        CSV --> RP
+    subgraph REPLAY["回放器（9.2 已实现，宿主机）"]
+        DWD["ecommerce_dw.dwd_events<br/>2,755,641 行（只读）"]
+        RP["回放器<br/>event_id = dedup_key<br/>按 event_time 节流"]
+        DWD --> RP
     end
 
     subgraph KAFKA["Kafka 3.9.1 · KRaft 单节点 · ecommerce-net"]
@@ -184,7 +186,7 @@ value 为事件对象。机器可读定义见 `streaming/schemas/event_v1.json`�
 Kafka 对含 `.` 或 `_` 的 topic 有 metric name 冲突警告：**同一 topic 名不要混用点号与下划线**。
 本项目统一用点号分层（`ecommerce.events.v1`），DLQ 用 `.dlq` 后缀，不使用下划线。
 
-### 4.3 Producer 约定（9.2 实现）
+### 4.3 Producer 约定（9.2 已实现）
 
 - `acks=all`、`enable.idempotence=true`、`max.in.flight.requests.per.connection<=5`；
 - 压缩建议 `lz4`（JSON 文本压缩比高，CPU 开销低）；
@@ -315,7 +317,7 @@ docker exec ecommerce-flink-taskmanager bash -lc \
   跨节点无法读取 checkpoint。
 - 命名卷在 `docker compose down`（不带 `-v`）后保留；`down -v` 会删除，等同于丢弃恢复点。
 
-### 6.5 恢复演练（9.1 已实测，9.2 用业务作业复演）
+### 6.5 恢复演练（9.1 已实测，9.3 用业务作业复演）
 
 R24 已用官方 `StateMachineExample.jar` 完成一次完整演练，命令与结果如下：
 
@@ -336,7 +338,7 @@ R24 已用官方 `StateMachineExample.jar` 完成一次完整演练，命令与�
    `/jobs/<new_id>` 状态 `RUNNING`。
 6. 取消恢复后的作业，保留 checkpoint 目录；`flink list` → `No running jobs`。
 
-9.2 的业务作业恢复演练在此基础上增加：
+9.3 的业务作业恢复演练在此基础上增加：
 
 1. 用 Kafka source 的作业，等待至少 2 个 `COMPLETED` checkpoint；
 2. 记录 checkpoint 路径、Kafka offset、结果表当前值；
@@ -347,7 +349,7 @@ R24 已用官方 `StateMachineExample.jar` 完成一次完整演练，命令与�
 7. 演练通过后按 §6.3 的 janitor 策略清理旧 checkpoint。
 
 > 9.1 的演练证明“cancel 后 checkpoint 仍在 + 可从 checkpoint 恢复”；业务作业的
-> Kafka offset/结果表一致性验证属于 9.2 验收项。
+> Kafka offset/结果表一致性验证属于 9.3 验收项。
 > 若改用 savepoint：`flink stop <job_id>` 默认写到
 > `state.savepoints.dir`，再用 `flink run -s file:/opt/flink/savepoints/<...>` 恢复；
 > 本阶段未把 savepoint 作为默认恢复点，因为它需要额外一次 stop 操作，且 9.1 的
@@ -358,13 +360,21 @@ R24 已用官方 `StateMachineExample.jar` 完成一次完整演练，命令与�
 ### 7.1 隔离边界
 
 - **同实例、不同 database**：MySQL `ecommerce_rt` 已建（`utf8mb4 / utf8mb4_0900_ai_ci`，空库）。
-- **禁止写 `ecommerce_dw`**：实时作业的 JDBC URL 只指向 `ecommerce_rt`；9.2 建独立账号
-  `rt_app`，仅授予 `ecommerce_rt.*` 的 DML/DDL，**不授予** `ecommerce_dw` 任何权限。
-- 对账作业对 `ecommerce_dw.ads_*` 只读；建议用只读账号（复用/扩展 `superset_ro` 思路，
-  9.2 单独建 `rt_recon_ro`）。
+- **禁止写 `ecommerce_dw`**：实时作业的 JDBC URL 只指向 `ecommerce_rt`；9.2 已建独立账号
+  `rt_app`，仅授予 `ecommerce_rt.*` 的 DML（SELECT/INSERT/UPDATE/DELETE），
+  **不授予** `ecommerce_dw` 任何权限。DDL 由管理员执行 `scripts/apply_rt_ddl.py`，
+  不授予应用账号（见 §11.2 偏差 2）。
+- 对账作业对 `ecommerce_dw.ads_*` 只读；已单独建只读账号 `rt_recon_ro`（复用
+  `superset_ro` 的最小权限思路）。
 - 生命周期隔离：实时表可随时 truncate/重建，不影响离线发布与 `ads_publish_log`。
 
-### 7.2 表结构（9.2 落地 DDL）
+### 7.2 表结构（9.2 已落地 DDL）
+
+> 已落地：`sql/ddl/streaming/02_create_rt_tables.sql`，由 `scripts/apply_rt_ddl.py`
+> 幂等应用（目标库硬性限制为 `ecommerce_rt` 或 `*_test`，禁止 `ecommerce_dw`）。
+> 2026-11-07 在 `ecommerce_rt` 实测 5 张表全部创建，列数分别为
+> `rt_traffic_daily` 9 / `rt_funnel_daily` 8 / `rt_item_behavior_daily` 8 /
+> `rt_reconciliation_daily` 8 / `rt_late_events` 6，表均为空（9.3 写入）。
 
 ```text
 rt_traffic_daily
@@ -623,7 +633,7 @@ docker compose stop flink-taskmanager flink-jobmanager kafka
 | Kafka roundtrip | 生产 key `12345` + JSON，消费回同一消息；end offsets `0:0, 1:0, 2:1` |
 | Flink 版本 | 1.20.1，commit `cb1e7b5` |
 | Flink 集群 | 1 TaskManager，2 slots；REST `/overview` 正常 |
-| Flink 作业 | `StateMachineExample.jar`，首轮 JobID `aec223f058b9e3e3d1fe0dd95be0fc94`，RUNNING |
+| Flink 作业 | `StateMachineExample.jar`，首轮 JobID `aec223f058b9e3e3d1fe0dd95be0fc94`；演练后已 cancel（`flink list`: No running jobs） |
 | Checkpoint | `chk-1` COMPLETED，路径 `file:/opt/flink/checkpoints/aec223f058b9e3e3d1fe0dd95be0fc94/chk-1`，state 15,755 bytes / `_metadata` 18,286 bytes，65 ms；`chk-2` 也已落盘 |
 | cancel 后保留 | `flink cancel` 后 `find` 仍看到 `chk-1/_metadata` 与 `chk-2/_metadata`（RETAIN_ON_CANCELLATION 生效） |
 | checkpoint 恢复 | `flink run -d -s .../chk-1` → 新 JobID `e276a23c32968209264f2da52c4c6a80`；REST `"restored":1`，作业 RUNNING |
@@ -666,6 +676,112 @@ docker compose build flink-jobmanager flink-taskmanager
 | `ads_funnel_interval` | 1 | 1 | OK |
 | `ads_item_behavior_daily` | 139 | 139 | OK |
 | `ads_publish_log` | 12 | 12 | OK |
+
+### 11.2 9.2 验收证据（2026-11-07，真实运行日志）
+
+实现位置：
+
+- 回放器：`src/ecommerce_dw/streaming/replay.py` + `scripts/replay_to_kafka.py`；
+- 校验消费者 / DLQ：`src/ecommerce_dw/streaming/validate_consumer.py` + `scripts/consume_validate.py`；
+- 消息构造与契约校验：`src/ecommerce_dw/streaming/events.py`；
+- RT 表/账号：`sql/ddl/streaming/02_create_rt_tables.sql`、`scripts/apply_rt_ddl.py`、
+  `scripts/apply_rt_grants.py`。
+
+原始证据日志：`C:\Zproject\ZClaude\streaming-9.2\`
+（`replay_2015-07-14_run*.log`、`consume_validate_run*.log`、`dlq_drill_detailed.log`、
+`baseline_before/after.txt`、`rt_ddl_apply.log`、`rt_grants_apply.log`、`pytest_full.log`、
+`ruff_check.log`、`ruff_format_check.log`）。
+
+#### 11.2.1 依赖选择
+
+| 依赖 | 版本 | 说明 |
+| --- | --- | --- |
+| `confluent-kafka` | 2.16.1 | Windows cp311 wheel；幂等 Producer、Consumer、AdminClient 均可用；未回退 `kafka-python-ng` |
+| `jsonschema` | 4.26.0 | Draft 2020-12 校验器 |
+| `rfc3339-validator` | 0.1.4 | 支撑 `format: date-time` 校验 |
+
+#### 11.2.2 RT 表与最小权限账号
+
+```bash
+python scripts/apply_rt_ddl.py
+python scripts/apply_rt_grants.py
+```
+
+| 项 | 结果 |
+| --- | --- |
+| `ecommerce_rt` 表 | 5 张全部创建（列数 9/8/8/8/6），行数均为 0 |
+| `rt_app` 有效授权 | 1 条：`SELECT, INSERT, UPDATE, DELETE ON ecommerce_rt.*`；无 DDL、无 `ecommerce_dw` |
+| `rt_recon_ro` 有效授权 | 8 条：`ecommerce_rt.*` SELECT + 7 张 `ecommerce_dw.ads_*` SELECT |
+| `SHOW GRANTS` 校验 | `rt_app` 授权中不含 `ecommerce_dw`（脚本内置硬断言，违规则退出 3） |
+
+#### 11.2.3 真实回放（2015-07-14，`ads_traffic_daily.is_full_day=1`）
+
+当日 DWD 共 **26,868** 行：`view` 26,007 / `add_to_cart` 630 / `transaction` 231；
+其中 `view` 行数与该日 `ads_traffic_daily.pv=26,007` 一致。
+
+```bash
+python scripts/replay_to_kafka.py --from 2015-07-14 --rate 5000
+```
+
+| 轮次 | produced | acked | schema 错误 | 本地 spool | 耗时 | 吞吐 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 第 1 轮 | 26,868 | 26,868 | 0 | 0 | 5.39 s | 4,984.8 msg/s |
+| 第 2 轮 | 26,868 | 26,868 | 0 | 0 | 5.41 s | 4,970.0 msg/s |
+
+两轮 `delivery.timeout.ms=120000`、`retries=10`、`max.in.flight=5`、`compression.type=lz4`；
+无失败重试、无 spool 文件。
+
+#### 11.2.4 从头消费校验
+
+```bash
+python scripts/consume_validate.py --from-beginning --idle-timeout 20
+```
+
+| 轮次 | total | valid | invalid | distinct event_id | 重复 event_id / 重复消息 | event_type 分布 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 第 1 轮 | 26,868 | 26,868 | 0 | 26,868 | 0 / 0 | view 26,007 / add_to_cart 630 / transaction 231 |
+| 第 2 轮 | 53,736 | 53,736 | 0 | 26,868 | 26,868 / 26,868 | view 52,014 / add_to_cart 1,260 / transaction 462 |
+
+分区 offset（`beginning..end`，`consumed_min..consumed_max`）：
+
+| 轮次 | p0 | p1 | p2 |
+| --- | --- | --- | --- |
+| 第 1 轮 | 0..8,782（消费 0..8,781） | 0..8,995（消费 0..8,994） | 1..9,092（消费 1..9,091） |
+| 第 2 轮 | 0..17,564（消费 0..17,563） | 0..17,990（消费 0..17,989） | 1..18,183（消费 1..18,182） |
+
+消费者耗时 23.56 s / 25.97 s（含 20 s idle-timeout 等待）。
+**结论**：两轮均 0 schema 错误；重复回放使消息数翻倍，但 distinct `event_id` 恒为 26,868，
+说明 9.3 按 `event_id` 去重即可吸收重复。
+
+#### 11.2.5 DLQ 演练（仅测试 topic）
+
+- 使用 `ecommerce.events.selftest.<uuid>` + `.dlq`，测试后删除；演练前后生产 topic 与生产 DLQ
+  的 offset 完全不变（`{0:(0,17564),1:(0,17990),2:(1,18183)}` / 全 0）。
+- 发送 5 条合法事件 + 1 条非法 JSON：消费者 `total=6 valid=5 invalid=1`；
+  非法原因 `invalid_json`；DLQ 收到该消息（测试 topic offset 5），headers 含
+  `error_reason`、`source_topic`、`partition`、`offset`、`payload` 且 payload 与原始字节一致。
+- 集成测试 `tests/integration/test_streaming_kafka.py` 2 条通过（全合法往返 + 非法 JSON 进 DLQ）。
+
+#### 11.2.6 生产基线、测试与代码质量
+
+| 项 | 结果 |
+| --- | --- |
+| 生产 13 表基线（验收前后各一次） | 13/13 MATCH；两次输出仅 `checked_at` 不同 |
+| 全量测试 | **216 passed, 1 skipped**（skip 为既有 Airflow DAG 依赖缺失，非 9.2 引入） |
+| 9.2 新增测试 | 58 条（56 单元 + 2 Kafka 集成） |
+| `ruff check .` / `ruff format --check .` | 全绿（115 files formatted） |
+
+#### 11.2.7 与设计的偏差与遗留风险
+
+| # | 说明 |
+| ---: | --- |
+| 1 | **回放数据源**：设计 §2 原画 CSV → 回放器；9.2 任务书要求从 `dwd_events` 只读查询、`event_id=dedup_key`。已按任务书实现并更新 §2 图，与离线去重口径完全一致。 |
+| 2 | **`rt_app` 权限**：设计 §7.1 原文 "DML/DDL"；9.2 按任务书只授予 DML，DDL 由管理员脚本执行，权限更严格。 |
+| 3 | **生产 topic 清理**：9.1 冒烟记录（`ecommerce.events.v1` p2 offset 0）在验收前用 `kafka-delete-records` 删除（low watermark 0→1），使从头消费精确等于 DWD 行数；未改 topic 配置，生产 DLQ 未动。 |
+| 4 | **恢复演练顺延**：本阶段没有 Flink 业务作业，业务作业的 checkpoint/Kafka offset 恢复演练改到 9.3（§6.5 已同步）。 |
+| 5 | **消费提交方式**：逐条异步 commit + 结束时同步 commit；非法消息先确认 DLQ 投递成功，再提交源 offset。 |
+| 6 | **遗留风险**：两轮验收共 53,736 条消息（26,868 distinct）保留在 `ecommerce.events.v1`（retention 7 天）。9.3 首跑若从 earliest 消费必须依赖 `event_id` 去重，或从 committed offset / latest 开始；否则 PV 会翻倍。 |
+| 7 | **未压测不限速**：验收固定 5,000 条/秒，未测 `--rate 0` 的峰值吞吐；单 broker RF=1 仍是容量边界。 |
 
 ## 12. 风险与后续
 
