@@ -2,7 +2,7 @@
 
 **基于 Retailrocket 电商行为数据的四层数据仓库与看板平台（V1.0）**：把约 1 GB 原始 CSV 建设为 MySQL 四层数仓（ODS → DWD → DWS → ADS），由 Airflow 每日编排增量构建与 60 条硬质量门禁，Superset 提供三个只读业务看板。
 
-**阶段状态：Phase 1–8 全部完成，V1.0 已交付；Phase 9.1–9.3 已完成。** Phase 9 为可选的 Kafka + Flink 实时扩展：已完成 Kafka/Flink 基础设施、`event_v1` 消息契约、DWD 回放器、schema 校验/DLQ 消费者、`ecommerce_rt` 5 张结果表与最小权限账号，以及 Flink DataStream 实时作业（`event_id` 去重 → UTC 日窗口 → JDBC upsert）与独立 SQL 对账。实时作业对 2015-07-14~07-16 共 39 个指标全部 MATCH，并通过 cancel/restore 演练。
+**阶段状态：Phase 1–8 全部完成，V1.0 已交付；Phase 9.1–9.4 已完成。** Phase 9 为可选的 Kafka + Flink 实时扩展：已完成 Kafka/Flink 基础设施、`event_v1` 消息契约、DWD 回放器、schema 校验/DLQ 消费者、`ecommerce_rt` 5 张结果表与最小权限账号，以及 Flink DataStream 实时作业（`event_id` 去重 → UTC 日窗口 → JDBC upsert）。9.4 分 20 批回放覆盖 137 个完整日（DWD 2,755,641 条，含前瞻重复共发 3,599,961 条），13 指标 × 137 天与离线 ADS 及独立 DWD SQL 全部 MATCH，并完成吞吐/延迟/反压容量验收。
 
 ---
 
@@ -288,16 +288,19 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 | 全新环境 | `docker-compose.fresh.yml` + 独立 env | 独立项目/端口/卷起栈、3 看板 15 数据集、只读 smoke 查询通过 |
 | Phase 9.2 实时回放 | `scripts/replay_to_kafka.py --from 2015-07-14 --rate 5000` | 两轮各 **26,868** 条，0 schema 错误，约 **4,985 msg/s** |
 | Phase 9.2 消费校验/DLQ | `scripts/consume_validate.py --from-beginning` | 第 2 轮 53,736 条全合法、0 非法、distinct `event_id` 26,868；DLQ 演练仅测试 topic |
-| Phase 9.3 Java 自检 | `bash scripts/build_flink_job.sh` | **42 passed / 0 failed**，jar 37,024 bytes |
+| Phase 9.3/9.4 Java 自检 | `bash scripts/build_flink_job.sh` | **48 passed / 0 failed**（9.4 新增 4 项 `ingest_time` + 2 项 `transaction_id=0` 契约），jar 38,099 bytes |
 | Phase 9.3 实时回放 | `scripts/replay_to_kafka.py --from 2015-07-15 --to 2015-07-17 --rate 2000` | **65,940** 条，0 失败，32.98 s，**1,999.2 msg/s** |
 | Phase 9.3 批流对账 | `python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16`（只读 `rt_recon_ro`） | **39/39 MATCH**（3 天 × 13 指标），`VERIFY_RT_VS_DWD_OK` |
 | Phase 9.3 恢复演练 | `flink cancel` → `flink run -d -s <chk-1>` | `restored:1`，续读位点非 0，恢复后对账仍 39/39 MATCH |
+| Phase 9.4 全量回放 | `python scripts/run_full_reconciliation.py --evidence-dir <dir> --reset-rt --reconcile` | 20 批覆盖 137 完整日；DWD **2,755,641** 条事件，含前瞻日重复回放共发出 **3,599,961** 条，checkpoint 122 成功 / 0 失败 |
+| Phase 9.4 全量对账 | `python scripts/reconcile_all.py --write`（只读 `rt_recon_ro` + `rt_app` 写审计表） | **1,781 MATCH / 0 DIFF / 26 SKIP**，审计表 1,807 行，`RECONCILIATION_OK` |
+| Phase 9.4 容量验收 | `--rate 5000` 与单批 `--rate 10000`；采样 REST 指标 | 生产者 4,991–9,755 msg/s；延迟 p50 中位 16.5 ms / p95 中位 98 ms（max 671 ms）；反压 0；state 最大 41 MB |
 
 测试矩阵与手算基线见 `docs/test_matrix.md`；性能优化与 EXPLAIN 见 `docs/performance.md`。
 
 ## 9. 已知限制
 
-- **离线批处理仍是主链路，实时链路用于回放验证**：Phase 9.1–9.3 已落地 Kafka/Flink session 集群、回放器、schema 校验/DLQ、`ecommerce_rt` 结果表与 Flink 日窗口作业；实时结果对 2015-07-14~07-16 与离线 ADS 同口径 39/39 MATCH，但未接入在线流量，商品排行/留存/告警未实时化。
+- **离线批处理仍是主链路，实时链路用于回放验证**：Phase 9.1–9.4 已落地 Kafka/Flink session 集群、回放器、schema 校验/DLQ、`ecommerce_rt` 结果表与 Flink 日窗口作业；9.4 已把 137 个完整日全部回放并与离线 ADS 同口径 1,781/1,781 MATCH，但未接入在线流量，商品排行/留存/告警未实时化。
 - **数据是 2015 年历史快照**：Retailrocket 数据集静态、无持续新增；增量的“新尾巴”在本仓库靠重放/样例模拟，不是真实在线流量。
 - **匿名访客口径**：`visitorid` 是 Cookie 级匿名标识，不是注册用户；Cookie 清理会高估 UV/留存。`visitorid=0` 的 3 行作为未知访客桶，计入 PV、不计入去重用户。
 - **首末日是部分日**：2015-05-03 自 03:00 UTC 起、2015-09-18 至 02:59 UTC 止；ADS 用 `is_full_day=0` 标记，留存末尾 cohort 用 `window_status='partial'`，不得当完整率使用。
@@ -358,11 +361,18 @@ checkpoint 取消保留与恢复演练通过。
 cancel → checkpoint → `flink run -s` 恢复演练 `restored:1` 且续读位点正确。详见
 `docs/streaming_design.md` §11.3。
 
+**9.4 全量对账与容量验收（已完成）**：20 批 × （目标 7 天 + 2 前瞻日）覆盖
+2015-05-03..2015-09-18 全部 137 个完整日；`rt_traffic_daily` 139 行（138 final）、
+`rt_funnel_daily` 973 行、`rt_item_behavior_daily` 139 行；`rt_reconciliation_daily`
+**1,807 行（1,781 MATCH / 0 DIFF / 26 SKIP）**，ADS 与 DWD 交叉复核同样 0 差异。
+实测生产者 4,991–9,755 msg/s、端到端 p95 中位 98 ms（max 671 ms）、反压 0、
+checkpoint 122 成功 / 0 失败、state 最大 41 MB。详见 `docs/streaming_design.md` §11.4。
+
 常用命令：
 
 ```bash
 bash scripts/download_flink_jars.sh          # 下载固定版本 connector 驱动
-bash scripts/build_flink_job.sh              # javac --release 17 + 42 项自检 + 打 jar
+bash scripts/build_flink_job.sh              # javac --release 17 + 48 项自检 + 打 jar
 docker compose build flink-jobmanager flink-taskmanager
 docker compose up -d --force-recreate flink-jobmanager flink-taskmanager
 bash scripts/deploy_flink_job.sh             # 提交作业并打印 JobID

@@ -214,7 +214,7 @@ python scripts/superset_setup.py          # 幂等 upsert 数据库/数据集/�
   `[warning] import failed`，随后由 `superset_setup.py` 完成 bootstrap；这是已知且
   可接受路径，见 `docs/performance.md` §8.2。
 
-### 5.10 Phase 9.3 实时作业（Kafka → Flink → `ecommerce_rt`）
+### 5.10 Phase 9.3/9.4 实时作业与全量对账（Kafka → Flink → `ecommerce_rt`）
 
 前置：5.8 的栈已起（Kafka/Flink healthy），`.env` 有 `RT_APP_PASSWORD`（Flink 容器内由
 compose 以 `RT_MYSQL_*` 注入）和 `RT_RECON_RO_PASSWORD`（对账只读账号），`ecommerce_rt`
@@ -222,7 +222,7 @@ compose 以 `RT_MYSQL_*` 注入）和 `RT_RECON_RO_PASSWORD`（对账只读账�
 
 ```bash
 bash scripts/download_flink_jars.sh     # 下载固定版本 connector / MySQL 驱动到 docker/flink/lib
-bash scripts/build_flink_job.sh         # javac --release 17 + 42 项自检 + build/flink-jobs/ecommerce-rt-job.jar
+bash scripts/build_flink_job.sh         # javac --release 17 + 48 项自检 + build/flink-jobs/ecommerce-rt-job.jar
 wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose build flink-jobmanager flink-taskmanager"
 wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose up -d --force-recreate flink-jobmanager flink-taskmanager"
 bash scripts/deploy_flink_job.sh        # 提交并打印 JOB_ID
@@ -463,6 +463,9 @@ docker compose up -d --force-recreate superset-init && docker compose up -d supe
 - [ ] Superset 4.1.2；3 看板 21 图；`superset_ro` 仅 SELECT
 - [ ] `python scripts/demo_phase8.py` 通过，生产 13 表基线不变
 - [ ] `python -m pytest` 236 passed / 1 skipped；DAG 契约 5 passed
-- [ ] Phase 9.3：`bash scripts/build_flink_job.sh` 输出 `SELFTEST passed=42 failed=0` 与
+- [ ] Phase 9.3/9.4：`bash scripts/build_flink_job.sh` 输出 `SELFTEST passed=48 failed=0` 与
       `BUILD_FLINK_JOB_OK`；`bash scripts/deploy_flink_job.sh` 打印 JobID；
-      `python scripts/verify_rt_vs_dwd.py <from> <to>` 输出 `VERIFY_RT_VS_DWD_OK`
+      `python scripts/verify_rt_vs_dwd.py <from> <to>` 输出 `VERIFY_RT_VS_DWD_OK`；
+      `python scripts/run_full_reconciliation.py --evidence-dir <dir> --list-batches` 打印 20 批；
+      全量对账 `python scripts/reconcile_all.py --from 2015-05-03 --to 2015-09-18 --write`
+      输出 `MATCH=1781 DIFF=0 SKIP=26` 与 `RECONCILIATION_OK`

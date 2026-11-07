@@ -1,10 +1,12 @@
-# Kafka + Flink 实时链路设计（Phase 9.1–9.3 · 基础设施、回放、校验与实时作业）
+# Kafka + Flink 实时链路设计（Phase 9.1–9.4 · 基础设施、回放、校验、实时作业与全量对账）
 
-> 状态：**9.1 / 9.2 / 9.3 已完成**（2026-11-07）。9.1 交付 Kafka/Flink 基础设施与消息契约；
+> 状态：**9.1 / 9.2 / 9.3 / 9.4 已完成**（2026-11-07）。9.1 交付 Kafka/Flink 基础设施与消息契约；
 > 9.2 交付 DWD 回放器、schema 校验/DLQ 消费者、`ecommerce_rt` 5 张结果表 DDL 与最小权限账号；
 > 9.3 交付 Flink DataStream 业务作业（`event_id` 去重 → UTC 日窗口 → JDBC upsert）、
 > 独立 SQL 对账脚本，并完成真实回放验收、cancel/restore 演练与 DLQ 容错验证
 > （JobID `c2bc776cd60fab3afd2ca80a5e2c071e`，39/39 指标 MATCH，详见 §11.3）。
+> 9.4 交付 20 批全量回放编排、全量对账审计表（1,781 MATCH / 0 DIFF / 26 SKIP）、
+> 延迟指标与吞吐/反压容量验收（详见 §11.4）。
 >
 > 上游事实基线：生产库 `ecommerce_dw` 的 13 张表行数复核不变（见 §10），
 > ODS 2,756,101 / DWD 2,755,641 / DWS+ADS 9 表 / `ads_publish_log` 12。
@@ -111,7 +113,7 @@ value 为事件对象。机器可读定义见 `streaming/schemas/event_v1.json`�
 | `visitor_id` | integer \| null | 是 | 非空时 `>= 1` | 原始 `visitorid="0"` 的 3 行置 null，并带 `quality_flags=["visitor_zero"]`。 |
 | `event_type` | string | 否 | `view` / `add_to_cart` / `transaction` | DWD 标准枚举；原始 `addtocart` 放 `raw_event_type`。 |
 | `item_id` | integer | 否 | `>= 1` | 商品 ID。 |
-| `transaction_id` | integer \| null | 是 | 非空时 `>= 1`；`event_type=transaction` 时必填，其他事件必须 null | 订单级标识，不是行级唯一。 |
+| `transaction_id` | integer \| null | 是 | 非空时 `>= 0`；`event_type=transaction` 时必填，其他事件必须 null | 订单级标识，不是行级唯一。0 是源数据合法值：`events.csv` 第 271795 行 `transactionid=0`，DWD 保留、ADS 计为一笔订单，实时侧同口径保留（9.4 全量对账发现，见 §11.4 偏差 1）。 |
 | `raw_event_type` | string | 是 | `view` / `addtocart` / `transaction` | 可选血缘字段；保留原始拼写。 |
 | `source_file` | string | 是 | — | 可选，来源 CSV basename。 |
 | `source_row_number` | integer | 是 | `>= 1` | 可选，CSV 物理行号（表头 = 1）。 |
@@ -541,14 +543,51 @@ WHERE o.is_full_day = 1
 7. **重复回放**：`event_id` 是否稳定；回放器是否生成了随机 ID。
 8. **事务跨日**：同一 `transaction_id` 是否跨日出现；离线按事件日计数，实时也必须按事件日。
 
+### 8.4 全量回放与对账执行流程（9.4）
+
+TaskManager 只有约 160 MB task heap，2.76 M 条 DWD 事件无法用一个 Flink 作业回放完
+（去重状态 + 日窗口集合会把 heap 打满）。9.4 因此把 137 个完整日切成 **20 批 × 7 天**
+（最后一批 4 天），每批：
+
+1. 提交一个**全新作业**，独立消费组 `ecommerce-rt-flink-v1-recon`、`--starting-offsets latest`；
+2. 回放 `目标 7 天 + 后续 2 个前瞻日`。前瞻日让水位线自然越过 `D+2 00:00`，
+   目标日才能被 `FinalizeFunction` 标成 `is_final=1`；
+3. 轮询 `rt_traffic_daily.is_final=1` 直到目标日全部 final，再等 consumer lag 归零；
+4. 采样 Flink 逐 operator 指标（吞吐/反压/空闲/延迟）与 checkpoint、lag；
+5. cancel 作业，按 §6.3 janitor 只保留最近 2 个 checkpoint 目录。
+
+前瞻日会在下一批**再次回放**：新作业从 `latest` 起消费，只会看到自己启动后写入的消息，
+Kafka 不会重投历史；即使某批重试造成重复，作业内 48h `event_id` 去重 + MySQL upsert
+也会吸收。最后一批（目标 09-14..09-17）之后没有真实数据，用一条合成的
+`wm-pusher-20150919` 事件（event_time `2015-09-19T01:00Z`）把水位线推过 09-19 00:00；
+该事件落在永不对账的窗口里，不进入任何业务指标。
+
+回放与对账的代码分工：
+
+| 步骤 | 入口 | 说明 |
+| --- | --- | --- |
+| 规划 + 逐批回放 | `scripts/run_full_reconciliation.py`（`src/ecommerce_dw/streaming/batch_replay.py`） | `--list-batches` 只看计划；`--reset-rt` 清空 RT 指标表；`--force` 重放已 final 的日 |
+| 13 指标对账 | `scripts/reconcile_all.py`（`reconcile_all.py`） | `--dry-run` 只读；`--write` 用 `rt_app` upsert `rt_reconciliation_daily` |
+| 独立期望值 | `verify_rt.read_expected` | 单条 CTE SQL 直接读 `dwd_events`，不复用 Flink 聚合代码 |
+| 运行状态 | `scripts/streaming_status.py`（`monitoring.py`） | 作业状态 / checkpoint / lag / RT 新鲜度；`--baseline` 复核生产 13 表 |
+
+`rt_reconciliation_daily` 每个 `(event_date_utc, metric_name)` 一行：完整日写
+`MATCH`/`DIFF` 与 `offline_value` / `realtime_value` / `abs_diff` / `rel_diff`；
+部分日写 `SKIP` 且所有数值列 NULL。脚本先做 **ADS vs DWD 交叉复核**（137 天 × 13 指标
+= 1,781 个值），任何不一致都会让 `ADS_VS_DWD diff>0` 并使退出码非 0 —— 即
+“离线 ADS 本身错了”与“实时链路错了”被分开报告，不会把离线口径问题伪装成实时差异。
+
+退出码：`RECONCILIATION_OK`（0 DIFF 且 0 ADS-vs-DWD 差异）为 0，否则 1。
+
 ## 9. 监控指标
 
 | 指标 | 定义/来源 | 目标/告警建议 |
 | --- | --- | --- |
-| 回放端到端延迟 | `processing_time - ingest_time`（p50/p95） | p95 < 5s；持续 > 30s 告警 |
+| 回放端到端延迟 | `processing_time - ingest_time`（p50/p95）；Flink 指标 `ingest_latency_p50_ms` / `ingest_latency_p95_ms`（ParseFunction 内的 10,000 样本直方图） | p95 < 5s；持续 > 30s 告警 |
 | 事件时间水位线滞后 | `max_event_time_seen - watermark` | < 60s（正常回放） |
-| 吞吐 | Kafka records-in / Flink numRecordsInPerSecond | 达到回放目标速率，无持续下降 |
-| Kafka 积压 | `kafka-consumer-groups.sh --describe --group ecommerce-rt-flink-v1` 的 LAG | < 10,000 条且 < 60s |
+| 吞吐 | Kafka records-in / Flink `numRecordsInPerSecond`；9.4 另用累计 `numRecordsIn` 计数器差分算区间吞吐（`*PerSecond` 是 60s EWMA，短批次会低估） | 达到回放目标速率，无持续下降 |
+| 反压/空闲 | 每个 operator 的 `backPressuredTimeMsPerSecond` / `idleTimeMsPerSecond` / `busyTimeMsPerSecond` | 反压持续 > 50% 或 busy=100% 需扩容 |
+| Kafka 积压 | `KafkaLagProbe`（AdminClient committed offset + `get_watermark_offsets`）或 `kafka-consumer-groups.sh --describe --group ecommerce-rt-flink-v1` 的 LAG | < 10,000 条且 < 60s |
 | 迟到比例 | `rt_late_events` 行数 / 总事件数（按日） | < 0.1%；突增告警 |
 | checkpoint 成功率 | REST `/jobs/<id>/checkpoints` 的 completed/(completed+failed) | >= 99% |
 | checkpoint 耗时/大小 | REST summary `end_to_end_duration` / `state_size` | p95 < 10s；< 100MB（9.1 实测 175ms / 15KB） |
@@ -556,10 +595,14 @@ WHERE o.is_full_day = 1
 | 结果新鲜度 | `MAX(updated_at)` per `event_date_utc` | 回放期间滞后 < 2 个 checkpoint 间隔 |
 | 作业重启次数 | Flink REST `numRestarts` | 5 分钟内 > 3 次告警 |
 
-采集方式（9.2 落地）：
+采集方式（9.2 落地，9.4 扩展为可重复脚本）：
 
 - Kafka：`kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group ecommerce-rt-flink-v1`；
 - Flink：REST `http://localhost:8081/jobs`、`/jobs/<id>/checkpoints`、`/jobs/<id>/metrics`；
+- 9.4 统一状态脚本：`python scripts/streaming_status.py`（作业状态、checkpoint、lag、RT 新鲜度），
+  `--baseline` 复核生产 13 表，`--json` 输出机器可读结果；
+- 9.4 批量回放/采样：`scripts/run_full_reconciliation.py` 每个批次把 Flink 逐 operator 指标、
+  lag、checkpoint 写入 `<evidence>/samples.jsonl` 与 `batches/batch_NN.json`；
 - MySQL：对账表 `rt_reconciliation_daily` + 结果表 `updated_at`；
 - 可选 Prometheus/Grafana：本机未部署，9.2 不引入新容器，先用 REST + 定时 SQL。
 
@@ -637,13 +680,14 @@ docker compose up -d kafka flink-jobmanager flink-taskmanager
 docker compose stop flink-taskmanager flink-jobmanager kafka
 ```
 
-### 10.5 容量结论（规划值，非吞吐压测）
+### 10.5 容量结论（9.4 已做吞吐压测，见 §11.4.3）
 
 - 3 分区 / RF=1 / 512m heap 的 Kafka，对 2.76M 条小 JSON 的离线回放绰绰有余；
-  按 1,500 条/秒约 31 分钟、5,000 条/秒约 9 分钟，单 broker 不构成瓶颈。
-- Flink 2 slots 足以承载日窗口 PV/UV/DAU + 简单漏斗；状态 < 50 MB，checkpoint 15 KB 量级。
-- 结果表规模：139 个日 × 3 张日表 + 139 × N 漏斗行，远小于离线 ADS；MySQL 同实例无压力。
-- 真正的瓶颈是**宿主内存**，不是 Kafka/Flink 吞吐；因此内存上限按实测收紧，不按“默认推荐值”放大。
+  9.4 实测生产者 5,000 档稳定 4,991–4,999 msg/s、单批 10,000 档实测 9,755 msg/s。
+- Flink 2 slots（1 TM / 160 MB task heap）在 7 天 + 2 前瞻日的批次下可持续 9.6k msg/s，
+  反压恒为 0，checkpoint 58–352 ms、state 10–41 MB。
+- 结果表规模：139 个日 × 3 张日表 + 139 × 7 漏斗行，远小于离线 ADS；MySQL 同实例无压力。
+- 真正的瓶颈是**批次大小 / task heap**（7 天是稳定上限），以及宿主内存，不是 Kafka/Flink 吞吐。
 
 ### 10.6 WSL2 重启/内存压力影响
 
@@ -983,6 +1027,155 @@ RT 连接固定使用只读账号 `rt_recon_ro`（`RT_RECON_RO_USER` 默认 `rt_
 | 10 | **KafkaSource 提示**：启动日志提示 `commit.offsets.on.checkpoint` 由 Flink 管理、未透传给 consumer；实测 checkpoint 后 group offset 正常推进并最终 lag=0，无功能影响。 |
 | 11 | **恢复演练未注入“checkpoint 之后首次出现的新事件”**：Job2 复读的 41,803 条全部被 `event_id` 去重（deduped=41,803），没有新事件进入窗口；该场景按 at-least-once + 确定性 `event_id` 设计应正常处理，但未单独实测，建议后续补一条 checkpoint 后新 event_id 的演练。 |
 
+### 11.4 9.4 验收证据（2026-11-07，真实运行日志）
+
+原始证据目录：`C:\Zproject\ZClaude\streaming-9.4\`
+（`orchestrator.log`、`batches/batch_01..20.json`、`samples.jsonl` 244 条采样、
+`reconciliation.json`、`logs/reconcile_write.log`、`logs/pytest_full.log`、
+`baseline/production_before.*` 与 `production_after.*`）。
+
+实现位置：
+
+- 批量编排：`src/ecommerce_dw/streaming/batch_replay.py` + `scripts/run_full_reconciliation.py`；
+- 全量对账：`src/ecommerce_dw/streaming/reconcile_all.py` + `scripts/reconcile_all.py`；
+- 状态/基线：`src/ecommerce_dw/streaming/monitoring.py` + `scripts/streaming_status.py`；
+- 延迟指标：`streaming/flink-job/.../parse/ParseFunction.java`（`ingest_latency_ms` 直方图 +
+  `ingest_latency_p50_ms` / `ingest_latency_p95_ms` gauge）；
+- 测试：`tests/unit/test_reconcile_all.py`、`tests/unit/test_batch_replay.py`。
+
+#### 11.4.1 20 批回放（每批 = 目标 7 天 + 2 前瞻日）
+
+DWD 共 **2,755,641** 条事件；因每批额外回放 2 个前瞻日，20 批实际发出
+**3,599,961** 条（= DWD 总量 + 前瞻重复）。所有批次均 1 次成功，无重试、无 schema 错误。
+
+| 批 | 目标日 | JobID | 发出 | msg/s | ckpt 成功/失败 | ckpt ms | state bytes | drain s | lag_end |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 05-04..05-10 (7d) | `0c963c9cf63b4c88545b6e406a1cd9e3` | 185,987 | 4,997.1 | 5/0 | 107 | 32,079,930 | 10.16 | 0 |
+| 2 | 05-11..05-17 (7d) | `6ee9959b401faaf96bbbd92082b98ad1` | 202,718 | 9,755.0 | 3/0 | 249 | 40,536,259 | 10.17 | 0 |
+| 3 | 05-18..05-24 (7d) | `2109b1c70513a7f28590fd0273a046f5` | 198,356 | 4,998.0 | 5/0 | 298 | 36,442,803 | 10.16 | 0 |
+| 4 | 05-25..05-31 (7d) | `44e91a848327ea9248a0f60529454cd6` | 187,926 | 4,994.7 | 5/0 | 200 | 35,694,236 | 12.19 | 0 |
+| 5 | 06-01..06-07 (7d) | `86c90bab545ce98188a7e2298524ab1b` | 191,041 | 4,996.6 | 5/0 | 204 | 35,262,746 | 12.23 | 0 |
+| 6 | 06-08..06-14 (7d) | `547ee1cedd8550e4dec23ca2d269a41f` | 178,757 | 4,991.4 | 5/0 | 352 | 35,437,701 | 10.19 | 0 |
+| 7 | 06-15..06-21 (7d) | `f7da86b0ea3622a059ea200ed173c517` | 192,865 | 4,999.4 | 5/0 | 199 | 36,481,781 | 10.14 | 0 |
+| 8 | 06-22..06-28 (7d) | `9901c3954f5103ef4b718fedb0ade675` | 186,103 | 4,998.1 | 5/0 | 108 | 34,806,357 | 10.19 | 0 |
+| 9 | 06-29..07-05 (7d) | `8a61f669a347b201e3df89b258292b98` | 185,945 | 4,993.8 | 5/0 | 204 | 35,927,511 | 12.22 | 0 |
+| 10 | 07-06..07-12 (7d) | `307032fa42d686dd9b947d0266b8a81e` | 214,807 | 4,999.2 | 6/0 | 133 | 41,023,308 | 12.27 | 0 |
+| 11 | 07-13..07-19 (7d) | `266bc8e6d6fecb06aa3761e746624f94` | 201,150 | 4,993.5 | 5/0 | 115 | 38,104,129 | 12.17 | 0 |
+| 12 | 07-20..07-26 (7d) | `a09895a5d7256dec89796ec860793a14` | 225,922 | 4,996.2 | 6/0 | 221 | 40,711,822 | 12.17 | 0 |
+| 13 | 07-27..08-02 (7d) | `9e0a96e8962ff65f264d1803c6e3f995` | 186,797 | 4,997.9 | 5/0 | 97 | 33,957,154 | 12.19 | 0 |
+| 14 | 08-03..08-09 (7d) | `70dfc9f6dd0a09980fe9eaddb0876a99` | 165,147 | 4,997.5 | 4/0 | 174 | 29,575,486 | 10.17 | 0 |
+| 15 | 08-10..08-16 (7d) | `bd305e39b40e26253502484965416a62` | 162,326 | 4,999.4 | 4/0 | 102 | 31,702,080 | 10.20 | 0 |
+| 16 | 08-17..08-23 (7d) | `e3c9bcaa34909553f9df55e076efa0c6` | 165,308 | 4,995.3 | 5/0 | 92 | 30,472,585 | 12.23 | 0 |
+| 17 | 08-24..08-30 (7d) | `a3492615ed06bd56bd2266993dadf13c` | 164,592 | 4,997.2 | 4/0 | 170 | 29,656,285 | 10.19 | 0 |
+| 18 | 08-31..09-06 (7d) | `5b1ca1af53056588381dda2afec354e4` | 159,633 | 4,991.0 | 4/0 | 106 | 31,072,355 | 10.20 | 0 |
+| 19 | 09-07..09-13 (7d) | `825d7e4a3cfd42030d0af945e7ee63bd` | 180,103 | 4,996.3 | 5/0 | 196 | 32,947,578 | 12.20 | 0 |
+| 20 | 09-14..09-17 (4d) | `eb90a705029c0be5c3db713b01177401` | 64,478 | 4,996.0 | 31/0 | 58 | 10,336,898 | 0.08 | 0 |
+
+合计：**3,599,961** 条，回放耗时 700.7 s（聚合 5,137 msg/s，含 10000 档与 20 批的启停开销）；
+checkpoint 累计 **122 成功 / 0 失败**；state 中位数 35.0 MB、**最大 41.0 MB**（< 100 MB 上限）；
+每批 drain 到 lag=0 用时 0.08–12.27 s。
+
+第 20 批说明（务必不要误读）：
+
+- 该批目标 09-14..09-17，回放止于 09-18（数据末日），因此没有自然数据能把水位线推过
+  09-19 00:00。作业在 19:13:04 注入合成事件 `wm-pusher-20150919`（event_time
+  `2015-09-19T01:00:00Z`）。
+- pusher 的 Kafka key 按 `visitor_id` 计算，**只落到分区 2**（已验证：分区 2 offset
+  1811669 即该事件，分区 0/1 尾部仍是 09-18 数据）。单分区水位线不会让全局水位线推进。
+- 2015-09-17 实际是在 **`withIdleness(5min)` 生效后**才被 finalize：pusher 19:13:04 注入，
+  09-17 直到 **19:17:53**（约 289 s ≈ 5 min）才变 final，`final_wait.waited_s = 286.89`。
+  即“pusher 推过水位线即可 final”的说法不准确；真实机制是“其它分区被判 idle 后全局水位线
+  才越过 09-19 00:00”。该批因此耗时 307 s，其余 19 批为 38–64 s。
+
+#### 11.4.2 对账结果（`rt_reconciliation_daily`）
+
+```bash
+python scripts/reconcile_all.py --from 2015-05-03 --to 2015-09-18 \
+    --write --json-out C:/Zproject/ZClaude/streaming-9.4/reconciliation.json
+```
+
+真实输出（`logs/reconcile_write.log`，退出码 0）：
+
+```text
+SUMMARY match=1781 diff=0 skip=26 total=1807
+
+ADS_VS_DWD full_days=137 matched=1781 diff=0
+WROTE table=rt_reconciliation_daily rows=1807 db_counts={'SKIP': 26, 'MATCH': 1781}
+RECONCILIATION_OK match=1781 diff=0 skip=26
+```
+
+| 项 | 结果 |
+| --- | --- |
+| 完整日 × 指标 | 137 × 13 = **1,781**，全部 `MATCH`（`abs_diff = rel_diff = 0`） |
+| 部分日 | 2015-05-03、2015-09-18 × 13 = **26** 行 `SKIP`，数值列全 NULL |
+| 审计表总行数 | **1,807**，139 个日期，主键 `(event_date_utc, metric_name)` |
+| ADS vs DWD 交叉复核 | 137 天 × 13 指标 = 1,781 个值，**diff=0**（离线口径本身无误） |
+| 重跑幂等 | 同一命令重复执行行数不变（`ON DUPLICATE KEY UPDATE`） |
+
+RT 结果表覆盖：
+
+| 表 | 行数 | 说明 |
+| --- | ---: | --- |
+| `rt_traffic_daily` | **139** | 2015-05-03..2015-09-18；`is_final=1` 共 **138** 行 |
+| `rt_funnel_daily` | **973** | 139 天 × 7 指标 |
+| `rt_item_behavior_daily` | **139** | 每天一行 |
+| `rt_late_events` | **0** | 回放有序，无超迟到事件 |
+| `rt_reconciliation_daily` | **1,807** | 见上 |
+
+2015-09-18 的 `is_final=0` 是**预期行为**，不是缺陷：该日只有 00:00–02:59 UTC 的部分数据
+（`ads_traffic_daily.is_full_day=0`），对账按规则写 `SKIP`；它的窗口要到 09-20 00:00 才
+finalize，而回放/验收在 09-18 结束，作业已 cancel。下游查询必须把 `is_final=0` 当作
+“进行中/可能修正”。
+
+#### 11.4.3 吞吐、延迟、反压与 checkpoint（实测）
+
+采样方式：每批作业运行期间每 5 s 抓一次 Flink REST
+（`/jobs/<id>/metrics` 与 `/jobs/<id>/vertices/<vid>/metrics`），共 **244** 个采样点。
+
+| 指标 | 实测值 | 采集来源 |
+| --- | --- | --- |
+| 生产者吞吐 5000 档 | 19 批稳定在 **4,991.0–4,999.4 msg/s** | `replay_to_kafka.py` 最终 summary |
+| 生产者吞吐 10000 档 | 第 2 批 **9,755.0 msg/s**（20.8 s 发完 202,718 条） | 同上 |
+| Flink source 计数器差分 | 5000 档（批次 1–19）每批中位数 **4,977–5,014 msg/s**；10000 档峰值 **9,622.8 msg/s** | `numRecordsIn` 相邻采样差分 |
+| `numRecordsInPerSecond`（EWMA） | 峰值 3,765.4 msg/s | 逐 operator gauge（60 s EWMA，短批次会低估） |
+| 端到端延迟 p50 | 中位数 **16.5 ms**，p95 **601 ms**，最大 **601 ms** | `ingest_latency_p50_ms` gauge（474 个读数） |
+| 端到端延迟 p95 | 中位数 **98 ms**，p95 **671 ms**，最大 **671 ms** | `ingest_latency_p95_ms` gauge（474 个读数） |
+| 反压 `backPressuredTimeMsPerSecond` | 478 个读数 **全部为 0**（max 0.0） | 逐 subtask/vertex |
+| 空闲 `idleTimeMsPerSecond` | 峰值 1000（100%），448/478 非零 | 逐 subtask（回放间隙正常空闲） |
+| checkpoint 成功/失败 | **122 / 0**（成功率 100%） | REST `/jobs/<id>/checkpoints` |
+| checkpoint 耗时 | 每批最新一次 **58–352 ms** | `end_to_end_duration` |
+| checkpoint 大小 | **10.3 MB – 41.0 MB**，中位数 35.0 MB | `state_size` |
+| Kafka lag | 244 个采样，峰值 88,435（回放中），每批收尾均归 **0** | AdminClient committed offset + watermark |
+
+容量结论：单 TM / 2 slots / 160 MB task heap 的配置下，**端到端可持续 9.6k msg/s**
+（第 2 批 10,000 档实测 9,755 msg/s 完成，无重试、无反压），5k 档有约 2× 余量；
+状态与 checkpoint 峰值 41 MB，距 100 MB 上限约 2.4× 余量；瓶颈不是 Kafka/Flink，
+而是**批次大小**——7 天 + 2 前瞻日是 160 MB heap 下能稳定完成的规模，扩大到 10 天
+曾在早期冒烟中接近内存上限，故保持 7 天。
+
+#### 11.4.4 生产基线与代码质量
+
+| 项 | 结果 |
+| --- | --- |
+| 生产 13 表基线（验收前后各一次） | **13/13 OK**，两次逐行一致（`baseline/production_before.*` / `production_after.*`） |
+| 全量测试 | **275 passed, 1 skipped**（skip 为既有 Airflow DAG 依赖缺失） |
+| 9.4 新增测试 | **37 条**（`test_reconcile_all.py` 18 + `test_batch_replay.py` 19）；另有 Java 自检新增 6 项 |
+| Java 自检 | **48 passed / 0 failed**（`SELFTEST_OK`），jar 38,099 bytes |
+| `ruff check .` | All checks passed |
+| `ruff format --check .` | 126 files already formatted |
+| 写入范围 | 仅 `ecommerce_rt`；`ecommerce_dw` 只读，未新增授权，`rt_recon_ro` 保持只读 |
+
+#### 11.4.5 与设计的偏差与遗留风险
+
+| # | 说明 |
+| ---: | --- |
+| 1 | **`transaction_id=0` 契约放宽**：首次全量回放第 6 批失败，原因是 `dwd_events` 有 1 行 `event_type=transaction, transaction_id=0`（`events.csv` 第 271795 行），而 v1 契约要求 `>= 1`。离线 ADS 把这行计为一笔订单（06-15：orders 165 / buyer_users 112；排除后为 164 / 111），因此跳过它会必然造成 DIFF。处理：`event_v1.json` 与 Java 解析器把下界放宽到 `>= 0`（负数仍拒绝），并补 Python + Java 单测；其余 2,755,640 行未变。 |
+| 2 | **合成 pusher 不能单独 finalize**：见 §11.4.1，09-17 依赖 `withIdleness(5min)`；pusher 只落到分区 2。若未来缩短 idleness 或提高并行度，需重新评估最后一批的等待时间。 |
+| 3 | **批次大小上限**：7 天 + 2 前瞻是当前 160 MB task heap 的稳定规模；扩到 10 天未实测通过，故不做更大批次。 |
+| 4 | **`numRecordsInPerSecond` 低估**：Flink 的 60 s EWMA 对 30–60 s 的批次只能到 3,765 msg/s，真实速率要用累计计数器差分（本报告已同时给出两者）。REST 采样偶尔返回上一轮计数器值，差分实现已折叠重复读数。 |
+| 5 | **2015-09-18 非 final**：预期行为（部分日，窗口未到 finalize 时间），对账写 `SKIP`，见 §11.4.2。 |
+| 6 | **对账脚本两条真实路径曾无单测覆盖**：首版 `--write` 在默认元组游标上取 `row["db"]` 崩溃、`--json-out` 因 `date` 不可序列化崩溃。已修复（游标类型无关的守卫 + `isoformat()`），并补 4 条回归单测；随后用真实 `--write --json-out` 跑通，审计表 1,807 行。 |
+
 ## 12. 风险与后续
 
 | 风险 | 影响 | 缓解 |
@@ -997,6 +1190,8 @@ RT 连接固定使用只读账号 `rt_recon_ro`（`RT_RECON_RO_USER` 默认 `rt_
 | schema 演进 | 消费端解析失败 | 未知主版本进 DLQ；不原地改 v1；v2 新 topic |
 | 商品排行/留存/监控告警未实时化 | 指标覆盖不全 | 商品排行、留存、监控告警仍未做 |
 | 事件时间 2015 与处理时间混淆 | 延迟指标失真 | 明确 `event_time` 只做窗口、`ingest_time` 只做延迟（§3.2） |
+| 批次大小超过 task heap | 作业 OOM / 反复重启 | 7 天 + 2 前瞻日已实测稳定（state ≤ 41 MB）；扩大批次前先压测，勿盲目调大 `--batch-days` |
+| 最后一批依赖 `withIdleness` | 无后续数据时 finalize 需等约 5 min | 预留等待时间（9.4 实测 287 s）；缩短 idleness 需重新验证误判风险 |
 | `docker compose down -v` | 删除 Kafka/Flink/MySQL 卷 | 生产项目严禁 `-v`；只在 fresh overlay 清理 |
 
 ### 后续阶段交接
@@ -1006,6 +1201,9 @@ RT 连接固定使用只读账号 `rt_recon_ro`（`RT_RECON_RO_USER` 默认 `rt_
   `rt_app` 最小权限、恢复演练骨架 —— 已完成。
 - **9.3**：Flink 去重 → UTC 日窗口 → JDBC upsert、7 个漏斗指标（含严格转化率）、
   迟到旁路、独立 SQL 对账、cancel/restore 演练、DLQ 容错 —— 已完成（§11.3）。
+- **9.4**：20 批全量回放 137 个完整日、13 指标 × 137 天对账 0 DIFF、审计表
+  `rt_reconciliation_daily` 1,807 行、延迟/吞吐/反压/checkpoint 容量验收、
+  批量编排与状态脚本 —— 已完成（§11.4）。
 - **未实现**（后续可选）：商品 Top-N 排行、留存 cohort、监控告警、
   application 模式/自动恢复、与 Airflow/Superset 的实时看板衔接
   （只读 `ecommerce_rt`，不改现有看板）。
