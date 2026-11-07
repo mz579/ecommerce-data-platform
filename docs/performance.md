@@ -27,7 +27,8 @@
 | `etl_watermark` | 139 |
 | `ads_publish_log` | 12 |
 
-辅助规模：`ods_item_properties_raw` 20,138,414 行，`dwd_events_stage` 2,756,101 行。
+辅助规模：`ods_item_properties_raw` 20,275,902 行、`ods_category_tree_raw` 1,669 行，
+三张 ODS 合计 23,033,672 行；`dwd_events_stage` 2,756,101 行。
 
 测量方式：
 
@@ -36,19 +37,28 @@
   的 `started_at` / `finished_at`；
 - 对照：优化前数字取自 Phase 4–7 已记录的生产构建日志与本文优化前的实测，
   优化后数字为本轮同数据集实测。数据规模一致，未通过删数据“加速”。
+  其中 `62.3s`（类目 as-of）、`21.7s`（门禁三表分组）与
+  `18.8s → 0.08s`（已移除的函数索引）是**索引创建前的历史实测**；索引现已
+  存在，当前环境不可直接复现，保留仅作优化前后对照。
+- **注意**：EXPLAIN 输出里的 `rows` 是优化器估算，不是实际行数；实际行数以
+  `COUNT(*)` 为准（§0 / §5）。本轮复测命令与原始输出见
+  `C:\Zproject\ZClaude\ecommerce-phase8\timings_r18.log`。
+
+
 
 ## 1. 结论速览
 
 | 项 | 优化前 | 优化后 | 说明 |
 | --- | ---: | ---: | --- |
-| DWD 单条 split 语句（2.7M stage） | 20.3s | 0.19s | `dedup_key` UNIQUE 索引 `eq_ref`，去掉 `SELECT DISTINCT` 派生表 |
+| DWD 单条 split 语句（新尾巴构建，stage 21,623） | 14.6s | 0.20s | 去掉 `SELECT DISTINCT dedup_key` 派生表，改走 UNIQUE `dedup_key` 的 `eq_ref` |
+| DWD 单条 split 语句（全量 stage 2.72M） | — | 19.7s | 全量时 `ROW_NUMBER()` 窗口排序是主成本，join 已不是瓶颈 |
 | 两日 DWD 重建（21,623 ODS） | 193.1s（build #53） | 178.0s（build #55） | 同 scope、同数据，整体约 −7.8% |
-| DWS 类目 as-of 快照（20.3M 属性） | 62.3s | 13.2s | `(property)` 索引把扫描从 20.1M 降到 1.71M |
-| 门禁 ODS 批次分组（3 张 ODS） | 21.7s | 3.9s | `(source_file, ingest_batch_id)` 覆盖索引 + index-only scan |
+| DWS 类目 as-of 快照（20.3M 属性） | 62.3s | 16.2s | `(property)` 索引把实际候选从 20.3M 降到 0.79M（EXPLAIN 估算 1.71M） |
+| 门禁 ODS 批次分组（3 张 ODS） | 21.7s | 4.6s | `(source_file, ingest_batch_id)` 覆盖索引 + index-only scan |
 | 全量质量门禁（89,305,119 行） | 224.65s（run #3） | 209.50s（run #7） | 60/60 PASS，相同行数 |
-| 区间漏斗（直接查询 DWD） | 13–14s | 0.001s | Phase 7 已物化 `ads_funnel_interval`；Phase 8 复核 |
-| 商品行为（直接查询 DWD） | 10.6–11.5s | 0.001s | 物化 `ads_item_behavior_daily` |
-| 商品排行（单日 top-100） | — | ~0.007s | `dws_item_daily` 区间扫描 + 窗口函数 |
+| 区间漏斗（直接查询 DWD） | 8.7s | 0.001s | Phase 7 已物化 `ads_funnel_interval`；Phase 8 复核 |
+| 商品行为（直接查询 DWD） | 10.5s | 0.001s | 物化 `ads_item_behavior_daily` |
+| 商品排行（单日 top-100） | — | ~0.004s | `dws_item_daily` 单日主键扫描 + 窗口函数 |
 
 ## 2. EXPLAIN 摘录
 
@@ -78,10 +88,15 @@ id | table          | type   | key                        | key_len | rows     |
 ```
 
 要点：join 侧是 `eq_ref`（UNIQUE `dedup_key`，每次 1 行，`Using index`），
-stage 侧走 `idx_dwd_stage_build (build_id, record_status)`。优化前 join 子查询
-`LEFT JOIN (SELECT DISTINCT dedup_key FROM dwd_events)` 会先把 275 万个 key
-物化一遍，单条 split 20.3s；改为直接 join UNIQUE 索引后 0.19s，语义不变
-（`rn=1` 且目标表无该 key 即为 winner）；duplicate 语句同样处理，0.198s。
+stage 侧走 `idx_dwd_stage_build (build_id, record_status)`。
+优化前 join 子查询 `LEFT JOIN (SELECT DISTINCT dedup_key FROM dwd_events)`
+会先把 275 万个 key 物化一遍；改为直接 join UNIQUE 索引后，在新尾巴构建
+（stage 21,623 行，build #55）上同一语句 **14.6s → 0.20s**，语义不变
+（`rn=1` 且目标表无该 key 即为 winner）；duplicate 语句同样处理。
+但全量 stage（build #30，2,719,267 行）上该语句仍约 **19.7s**，此时成本主要
+来自 `ROW_NUMBER() OVER (PARTITION BY dedup_key)` 的窗口排序，join 已不是瓶颈。
+因此不能把“2.7M stage 从 20s 降到 0.2s”作为结论。
+
 
 ### Q2 DWS 类目 as-of 快照
 
@@ -97,8 +112,10 @@ id | table                    | type | key                       | key_len | row
 1  | ods_item_properties_raw  | ref  | idx_ods_ip_raw_property   | 514     | 1712938   | Using where
 ```
 
-要点：`(property)` 索引把候选从 20.1M 降到 1.71M，实测 62.3s → 13.2s。
+要点：`(property)` 索引把实际候选行从 20,275,902 降到 788,214（EXPLAIN 的
+`rows=1,712,938` 是优化器估算，不是实际行数）；实测 62.3s → 16.2s。
 `CAST` 只作用于已过滤行，不需要函数索引。
+
 
 ### Q3 门禁 ODS 批次分组
 
@@ -114,8 +131,9 @@ id | table          | type  | key                           | key_len | rows    
 ```
 
 要点：`Using index` = 覆盖索引 index-only scan，不回表；三张 ODS 表同理。
-这是门禁中最重的 `ods_batch_log_rowcount` / `ods_batch_coverage` 的主要成本，
-实测 21.7s → 3.9s。
+这是门禁中最重的 `ods_batch_log_rowcount` / `ods_batch_coverage` 的主要成本。
+单看 `ods_events_raw` 为 0.34s；三张 ODS 合并分组实测 21.7s → 4.6s。
+
 
 ### Q4 门禁账实对账 join
 
@@ -129,7 +147,9 @@ id | table                  | type  | key                           | rows      
 ```
 
 要点：三张 ODS 的分组子查询全部 index-only；`etl_batch_log` 只有 5 行，
-hash join 合理。若没有覆盖索引，20.1M 行的属性表要回表，门禁会明显更慢。
+hash join 合理。上表 `rows` 均为优化器估算；实际三张 ODS 合计 23,033,672 行
+（属性表 20,275,902 行）。若没有覆盖索引，2000 万行的属性表要回表，门禁会明显更慢。
+
 
 ### Q5 商品排行（单日 top-100）
 
@@ -152,8 +172,10 @@ id | table   | type  | key     | rows    | Extra
 2  | t       | range | PRIMARY | 372036  | Using where; Using filesort
 ```
 
-要点：按日主键区间扫描 + 窗口排序，单日实测约 0.007s；没有为排行新增索引
-（`PRIMARY (event_date_utc, item_id)` 已足够，新增索引收益无法证明）。
+要点：按日主键区间扫描 + 窗口排序，单日实测约 0.004s（30 天窗口约 0.093s）；
+没有为排行新增索引（`PRIMARY (event_date_utc, item_id)` 已足够，新增索引收益
+无法证明）。
+
 
 ### Q6 区间漏斗（直接聚合 DWD）
 
@@ -164,10 +186,12 @@ id | table        | type | key | rows     | Extra
 ```
 
 要点：窗口覆盖 2015-04-01–2015-09-30（接近全量），优化器放弃日期索引走全表
-+ 临时表，实测 13–14s。该查询在 Superset 看板每次刷新都会触发，因此 Phase 7
-已物化为 `ads_funnel_interval` 单行表；Phase 8 复核冷启动查询约 **0.001s**。
-同理 `ads_item_behavior_daily` 直接聚合 10.6–11.5s，物化后约 0.001s。
++ 临时表，实测 8.7s（EXPLAIN 的 `rows=2,722,837` 是估算，实际 2,755,641 行）。
+该查询在 Superset 看板每次刷新都会触发，因此 Phase 7 已物化为
+`ads_funnel_interval` 单行表；Phase 8 复核冷启动查询约 **0.001s**。
+同理 `ads_item_behavior_daily` 直接聚合 10.5s，物化后约 0.001s。
 结论：这类查询应继续“预计算 + 读表”，不靠加索引解决。
+
 
 ## 3. 索引决策
 
@@ -178,7 +202,7 @@ id | table        | type | key | rows     | Extra
 | # | 表 | 索引 | 列 | 用途 / EXPLAIN 证据 |
 | --- | --- | --- | --- | --- |
 | 1 | `ods_events_raw` | `idx_ods_events_raw_file_batch` | `(source_file, ingest_batch_id)` | 门禁批次分组 index-only；之前全表回表 |
-| 2 | `ods_item_properties_raw` | `idx_ods_ip_raw_property` | `(property)` | 类目 as-of 只取 `categoryid`，20.1M → 1.71M |
+| 2 | `ods_item_properties_raw` | `idx_ods_ip_raw_property` | `(property)` | 类目 as-of 只取 `categoryid`，实际 20,275,902 → 788,214 行（EXPLAIN 估算 1,712,938） |
 | 3 | `ods_item_properties_raw` | `idx_ods_ip_raw_file_batch` | `(source_file, ingest_batch_id)` | 门禁账实对账 index-only |
 | 4 | `ods_category_tree_raw` | `idx_ods_ct_raw_file_batch` | `(source_file, ingest_batch_id)` | 同上（表小，但保持三表一致） |
 | 5 | `dwd_events_stage` | `idx_dwd_stage_build` | `(build_id, record_status)` | split 只读当前 build 的 OK/REJECT 行 |
@@ -190,14 +214,16 @@ id | table        | type | key | rows     | Extra
 ### 被否决的方案
 
 - **`ods_events_raw` 函数索引 `(source_file, CAST(timestamp AS UNSIGNED))`**：
-  DWD 按日期读取 ODS 的查询从 18.8s 降到 0.08s，但 MySQL 会在 INSERT 时校验
-  函数索引；ODS 契约允许保留脏行供 DWD 拒绝，插入 `timestamp='oops'` 会直接
-  报 **error 3751 “Data truncated for functional index”**，破坏“原始层不丢脏行”
-  的硬约束。已从生产库和 DDL 中移除，并在 `apply_perf_indexes.py` 文档中记录。
+  历史实测（索引当时仍存在）DWD 按日期读取 ODS 的查询从 18.8s 降到 0.08s；
+  该索引已移除，当前不可复现。MySQL 会在 INSERT 时校验函数索引；ODS 契约允许
+  保留脏行供 DWD 拒绝，插入 `timestamp='oops'` 会直接报
+  **error 3751 “Data truncated for functional index”**，破坏“原始层不丢脏行”
+  的硬约束，因此从生产库和 DDL 中移除。
 - **给 `dwd_events` 加日期 + 事件类型复合索引**：Q6 的窗口接近全量，优化器
   仍会选全表；加索引只会增加写入成本。正确解法是物化，不是索引。
-- **给 `ads_item_ranking_daily` 加排序索引**：表仅 13,900 行，查询已 0.007s，
-  无收益。
+- **给 `ads_item_ranking_daily` 加排序索引**：表仅 13,900 行，单日查询已约
+  0.004s，无收益。
+
 
 ## 4. SQL 重写（非索引）
 
@@ -215,9 +241,11 @@ LEFT JOIN dwd_events e ON e.dedup_key = s.dedup_key
 ```
 
 `dwd_events.dedup_key` 本身是 UNIQUE，`DISTINCT` 派生表只是把 275 万 key 物化
-一次再做 join；直接 join 让优化器走 `eq_ref`。winner / duplicate 两条语句语义
-不变，单条 20.3s → 0.19s。该改动已由 Phase 8 E2E 手工样例与全量质量门禁验证：
-去重数、拒绝数、账实一致均不变。
+一次再做 join；直接 join 让优化器走 `eq_ref`。在新尾巴构建（stage 21,623 行）
+上同一语句实测 **14.6s → 0.20s**；winner / duplicate 两条语句语义不变。
+但全量 stage（2,719,267 行）上仍约 19.7s，窗口排序才是主成本。该改动已由
+Phase 8 E2E 手工样例与全量质量门禁验证：去重数、拒绝数、账实一致均不变。
+
 
 ## 5. DWD / 门禁实测
 
@@ -229,8 +257,9 @@ build #55  DATES 2015-09-16,2015-09-17  ods=21,623 ok=21,620 dup=3 reject=0  178
 ```
 
 单日 build #54（优化后）：11,495 ODS → 11,494 ok + 1 dup + 0 reject，126.6s。
-两日整体约 −7.8%；单条 split 的收益最大，但 DWD 构建还包含 staging 写入、
-哈希计算、日志与提交，因此整体不会同比例下降。
+两日整体约 −7.8%；新尾巴构建的单条 split 收益明显（14.6s → 0.20s），但全量
+stage 的 split 仍约 19.7s，且 DWD 构建还包含 staging 写入、哈希计算、日志与
+提交，因此整体不会同比例下降。
 
 ### 全量质量门禁
 
@@ -241,6 +270,16 @@ build #55  DATES 2015-09-16,2015-09-17  ods=21,623 ok=21,620 dup=3 reject=0  178
 
 同规则数、同行数，约 −6.7%。最重的三条规则（`ods_source_path_unique`、
 `ods_batch_log_rowcount`、`ods_batch_coverage`）都受益于 ODS 覆盖索引。
+
+### DWS/ADS 独立校验
+
+```bash
+python -m ecommerce_dw.dws.cli verify
+# verify    : 2094 checks across 139 days -> ALL MATCH
+```
+
+2,094 项检查、139 个业务日，全部 MATCH；该结果不依赖本文的性能改动。
+
 
 ## 6. 可重复演示（`scripts/demo_phase8.py`）
 
