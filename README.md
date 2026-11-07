@@ -28,12 +28,14 @@
   行级实测与按日重建幂等实测见 `docs/dwd_design.md` §9。
 - **Phase 4 ✅ 已完成**：DWS/ADS 建模与指标落地——纯 SQL 服务端聚合
   （`INSERT ... SELECT`，Python 内存有界），3 张 DWS 日汇总表
-  （`dws_user_daily` / `dws_item_daily` / `dws_category_daily`）+ 4 张 ADS 应用表
+  （`dws_user_daily` / `dws_item_daily` / `dws_category_daily`）+ 6 张 ADS 应用表
   （`ads_traffic_daily` PV/UV/DAU、`ads_funnel_daily` 漏斗长表 9 口径、`ads_item_ranking_daily`
-  商品日排行 Top-100、`ads_retention_cohort` 次日留存），支持 FULL / DATES 幂等重建与
+  商品日排行 Top-100、`ads_retention_cohort` 次日留存、`ads_item_behavior_daily` 每日去重商品数
+  、`ads_funnel_interval` 窗口级区间漏斗），支持 FULL / DATES 幂等重建与
   `dws_ads_build_log` 批次审计，构建内不变量 + `verify` 独立 SQL 复算双闸门。
-  **全量构建已完成（build #1 LOADED，3,431,482 行 / 7 表，164.5s）**：
-  PV 全区间 2,649,436、区间 UV 1,396,937、D1 留存 2.75%，`verify` 1,668 checks
+  **全量构建已完成（build #8 LOADED，3,431,622 行 / 9 表，555.7s）**（Phase 4 基线
+  build #1 的 7 张表行数逐张一致 = 3,431,482；新增 2 张 = 139 + 1）：
+  PV 全区间 2,649,436、区间 UV 1,396,937、D1 留存 2.75%，`verify` 2,094 checks
   全窗口 ALL MATCH，设计见 `docs/dws_ads_design.md`，代码在 `src/ecommerce_dw/dws/`。
 - **Phase 5 ✅ 已完成**：增量处理 + 质量门禁。**增量**以
   `etl_watermark` 水位线（业务日期 × 已消费 ODS 批次）为唯一驱动，同一入口处理
@@ -44,8 +46,14 @@
   规则**（完整性 3 + 唯一性 12 + 合法性 9 + 范围 12 + 跨层对账 24）硬失败，任一 FAIL
   拒绝发布 ADS，运行与逐规则结果落 `quality_check_run` / `quality_check_result`，
   发布写 `ads_publish_log`。全量门禁实测：run #1 = PASS 59/59（216.74s）、
-  run #2 = PASS（200.22s），加规则后 run #3 = **PASS 60/60，89,305,119 rows，224.65s**，
-  `ads_publish_log` 保持 2 行。统一入口 `python -m ecommerce_dw.cli`
+  run #2 = PASS（200.22s），加规则后 run #3 = **PASS 60/60，89,305,119 rows，224.65s**。
+  门禁作用域守卫（Phase 7 R16）上线后新增 `validate_publish_scope`：FULL 发布须由
+  FULL 作用域 PASS 门禁背书、DATES 发布须由同日期集合的 DATES 门禁背书，否则拒绝
+  （exit 2），正/反例见 `tests/unit/test_quality_runner.py` 与
+  `tests/integration/test_phase5_gate_incremental_mysql.py`。`ads_publish_log` 现 12 行
+  （publish_id 5–9 为规则上线前的 FULL 证据发布，保留作审计；10–12 为 R16 验收的
+  三轮刷新演示，见 `docs/superset_design.md`
+  §9.8）。统一入口 `python -m ecommerce_dw.cli`
   （incremental / quality / publish / verify / status）。设计与实测详见
   `docs/incremental_and_quality.md`。
 - **Phase 6 ✅ 已完成**：Airflow 编排——官方镜像 `apache/airflow:2.10.5-python3.11`
@@ -63,13 +71,19 @@
 - **Phase 7 ✅ 已完成**：Superset 看板——镜像锁 `apache/superset:4.1.2`
   （最小 Dockerfile 补 `pymysql` + `psycopg2-binary`），元数据落在 PostgreSQL
   独立库 `superset_meta`（与 Airflow 的 `meta` 物理隔离）；业务连接用独立只读账号
-  `superset_ro`（仅 SELECT 4 张 ADS 应用表 + 5 张受控视图，**不直连 `ecom_app`**，
+  `superset_ro`（仅 SELECT 6 张 ADS 应用表 + 5 张受控视图，**不直连 `ecom_app`**，
   控制表 `ads_publish_log` 不开放，新鲜度走 `v_ads_publish_status` 视图）。
   一个 `superset-init` 容器从空元库一键重建（建库 → `db upgrade` → 幂等 admin →
   `import-dashboards` 导入看板 JSON → 修正连接口令）。**三个看板 21 张图**：
   运营总览（11）/ 用户行为（5）/ 商品分析（5），各含口径说明 panel；原生筛选器
-  （日期、转化口径、类目）before/after 与发布刷新（`publish --run 5`）均有真浏览器
-  截图证据；5 项关键指标与直连 SQL 复核 **ALL MATCH**。设计/口径/全部实测证据见
+  （日期、转化口径、类目）before/after 与发布刷新（`publish --dates 2015-09-16,2015-09-17
+  --run 5`）均有真浏览器截图证据；5 项关键指标与直连 SQL 复核 **ALL MATCH**。
+  **Phase 7 R16 返工**：把 PS 昂贵的区间漏斗 / 每日商品行为聚合物化为 ADS 物理表
+  （`ads_funnel_interval` / `ads_item_behavior_daily`，随构建幂等重建、`verify` 独立
+  复核），图源冷启动从 ~9.3/~10.0s 压到 ~0.00s；修复加购率日趋势空态（数据集不再
+  暴露 `metric_name` 列，杜绝原生筛选器按列名泄漏导致空集）；截图脚本带硬断言
+  （任何 `Waiting on` / `No results` → exit 1）；发布门禁加作用域守卫（FULL↔FULL、
+  DATES↔同日期集合，否则拒绝 exit 2，正/反例测试覆盖）。设计/口径/全部实测证据见
   `docs/superset_design.md`，声明式生成脚本 `scripts/superset_setup.py`。
 - 可复用流式统计模块在 `src/ecommerce_dw/eda/`（无数据库、只读本地 CSV）。
 - 工程骨架 + 两个数据库的容器编排文件（`docker-compose.yml`）。
@@ -168,7 +182,9 @@ pytest
 - **设计文档**：`docs/dws_ads_design.md`（表结构/粒度/口径/重建语义/独立复核/生产实测）。
 - **构建**：`python -m ecommerce_dw.dws.cli build [--dates ...] [--top-n N] [--force]`
   （全量 / 按 UTC 日幂等重建；另提供 `verify` / `status` / `cleanup` 子命令）。
-- **DDL**：`scripts/apply_dws_ads_ddl.py` 应用 `sql/ddl/dws_*.sql` + `ads_*.sql`（8 张表）。
+- **DDL**：`scripts/apply_dws_ads_ddl.py` 应用 `sql/ddl/dws_*.sql` + `ads_*.sql`（10 张表）。
+  R16 新增 `ads_funnel_interval.sql` / `ads_item_behavior_daily.sql`（面板物化表，
+  见 Phase 7 段）。
 - **聚合核心**：`src/ecommerce_dw/dws/`（`agg_sql.py` 纯 SQL 语句、`builder.py` 构建编排、
   `constants.py` 口径常量，`AGG_VERSION="1"`）。
 
@@ -221,8 +237,9 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 - **只读账号与受控视图**：`python scripts/apply_superset_grants.py`（幂等，
   建 5 个受控视图 + `superset_ro` 授权并打印 `SHOW GRANTS`）。
 - **验收脚本**：`superset_evidence.py`（指标一致性）、`superset_ui_evidence.py`
-  （筛选器 before/after）、`superset_screenshots.py`（真实渲染截图）。
-- **产物**：`dashboards/exports/`（可重建看板包）、`dashboards/screenshots/`（6 张 PNG）。
+  （R16 硬断言筛选器/发布刷新）、`superset_screenshots.py`（真实渲染截图，
+  复用同一硬断言 helper）。
+- **产物**：`dashboards/exports/`（可重建看板包）、`dashboards/screenshots/`（8 张 PNG）。
 - **日常访问**：`http://localhost:8088`（admin）。
 
 ## Docker（数据库）启停
@@ -309,9 +326,9 @@ python scripts/check_db_health.py
   最小 Dockerfile 补 `pymysql` + `psycopg2-binary`）；`superset-init` 退出码 0、
   `superset` 容器 `healthy`、`superset version` = `4.1.2`；元库
   `superset_meta` 建在 PostgreSQL（与 `meta` 隔离）；业务库只读账号
-  `superset_ro` SHOW GRANTS = 4 张 ADS 表 + 5 张受控视图全 SELECT、无任何写权限；
+  `superset_ro` SHOW GRANTS = 6 张 ADS 表 + 5 张受控视图全 SELECT、无任何写权限；
   三个看板 dashboard_slices = 11 / 5 / 5，导入幂等复跑数量不变，5 项关键指标
-  ALL MATCH，筛选器与刷新截图 6 张（证据见 `docs/superset_design.md` §9）。
+  ALL MATCH，筛选器与刷新截图 8 张且带硬断言（证据见 `docs/superset_design.md` §9）。
 
 ## 目录结构
 
@@ -333,7 +350,7 @@ ecommerce-data-platform/
 ├─ streaming/             # Kafka + Flink 实时链路（后续 Phase）
 ├─ dashboards/            # Phase 7：看板产物
 │  ├─ exports/            #   可重建看板包（含 charts/datasets/databases/metadata）
-│  └─ screenshots/        #   真实渲染截图（默认/筛选/刷新前后共 6 张）
+│  └─ screenshots/        #   真实渲染截图（默认/筛选/发布前后共 8 张，R16 硬断言）
 ├─ tests/                 # 冒烟/单元/集成/数据质量测试
 ├─ docs/                  # 架构文档
 ├─ docker/mysql/init/     # MySQL 初始化 SQL
@@ -348,15 +365,18 @@ ecommerce-data-platform/
 - 容器运行时已就绪且 Phase 0 容器相关交付物已实测通过（WSL2 内 Docker Engine，
   见「已验证环境」）；若日后迁到 Docker Desktop 或 CI 环境，以「已验证环境」为基线重新核对。
 - Phase 3 DWD 全量构建在 WSL 里的 MySQL 上实测通过（行数恒等式成立，见
-  `docs/dwd_design.md` §9）；Phase 4 DWS/ADS 全量构建同样实测通过（build #1，
-  `verify` ALL MATCH，见 `docs/dws_ads_design.md` §8）；Phase 5 增量与 60 条质量门禁
+  `docs/dwd_design.md` §9）；Phase 4 DWS/ADS 全量构建同样实测通过（build #8，
+  `verify` 2,094 checks ALL MATCH，见 `docs/dws_ads_design.md` §8）；Phase 5 增量与 60 条质量门禁
   实测通过（见 `docs/incremental_and_quality.md` §9，含崩溃恢复实证）；下次启动前先
   `docker compose up -d` 并等待 MySQL 健康。
 - `docs/architecture.md` 中包含完整 Roadmap；下一阶段为「Phase 8：测试、性能与交付
   （V1.0）」——在 Phase 1~7 全部就绪的基础上做系统性验收与性能压测后再交付。
-- Phase 7 备注：本机 Superset 图表查询在筛选器 APPLY 触发 12 图并发重查时较慢
-  （WSL2 环境 CPU/网络波动，单查询本身毫秒级、SQL 均走索引），已在前端证据脚本中
-  做「等待收敛 + 超时重试」处理，不影响验收结论。
+- Phase 7 R16 备注：区间漏斗 / 每日商品行为两个昂贵图源已物化为 ADS 物理表，
+  SUPERSET_RO 图源冷启动全部降到 ~0.00s（物化前 9.3s / 10.0s）；证据脚本带硬断言
+  （任何 `Waiting on` / `No results` / `MySQL Error` → exit 1）与有界轮询，三个
+  看板最终截图与断言输出见 `docs/superset_design.md` §9.7~§9.10。发布门禁作用域
+  守卫上线后，`ads_publish_log` 历史行（publish_id 5–9，门禁作用域规则前的 FULL
+  证据发布）**保留不删**，仅作审计；现行规则下不匹配的发布会被拒绝（见 §8）。
 
 ## 安全说明
 

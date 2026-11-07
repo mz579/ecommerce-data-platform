@@ -6,9 +6,10 @@
 > `data_contract.md`（契约）、`data_dictionary.md`（ODS 扫描事实）。
 >
 > 核心一句话：**从 DWD 标准明细 `dwd_events`（2,755,641 行）出发，以纯 SQL
-> `INSERT ... SELECT` 服务端聚合出 3 张 DWS 日汇总表 + 4 张 ADS 应用表，逐步
-> 支持 PV / UV / DAU / 加购率 / 转化率 / 商品排行 / 次日留存等指标直接查表；所有
-> 聚合均服务端完成、Python 内存有界、按 UTC 日幂等重建。**
+> `INSERT ... SELECT` 服务端聚合出 3 张 DWS 日汇总表 + 6 张 ADS 应用表，逐步
+> 支持 PV / UV / DAU / 加购率 / 转化率 / 商品排行 / 次日留存 / 区间漏斗 / 每日
+> 去重商品数等指标直接查表；所有聚合均服务端完成、Python 内存有界、按 UTC 日
+> 幂等重建。**
 >
 > 本文所有指标数值均为**生产库 `ecommerce_dw` 实测值**（来自构建后的直接查询与
 > `verify`，无推算），每个 ADS 指标给出可复现 SQL（§8）。
@@ -19,9 +20,9 @@
 | --- | --- |
 | 层 | DWS（Data Warehouse Summary / 汇总层）+ ADS（Application Data Store / 应用层） |
 | 输入 | `dwd_events`（DWD 去重后标准明细，唯一事实源）+ `ods_item_properties_raw`（categoryid 属性快照，仅供类目归属） |
-| 输出 | DWS：`dws_user_daily` / `dws_item_daily` / `dws_category_daily`；ADS：`ads_traffic_daily` / `ads_funnel_daily` / `ads_item_ranking_daily` / `ads_retention_cohort`；审计：`dws_ads_build_log` |
+| 输出 | DWS：`dws_user_daily` / `dws_item_daily` / `dws_category_daily`；ADS：`ads_traffic_daily` / `ads_funnel_daily` / `ads_item_ranking_daily` / `ads_retention_cohort` / `ads_item_behavior_daily` / `ads_funnel_interval`；审计：`dws_ads_build_log` |
 | DWS 粒度 | 一行 = 一个「日 × 维度值」的去重行为汇总（人 / 商品 / 类目，UTC 日） |
-| ADS 粒度 | 流量日报=一日一行；漏斗=一日一指 9 行；排行=一日最多 N 行；留存=一 cohort 一年龄行 |
+| ADS 粒度 | 流量日报=一日一行；漏斗=一日一指 9 行；排行=一日最多 N 行；留存=一 cohort 一年龄行；商品行为=一日一行；区间漏斗=单窗一行 |
 | 时区 | 全链路 UTC；日界 = 世界时零点（`event_date_utc` 分区键） |
 | 重建 | FULL（全量）/ DATES（按 UTC 日）两套语义，同 scope 幂等 |
 
@@ -144,6 +145,50 @@
 ∈ `[05-05, 09-17]`）。`09-17` / `09-18` 的 cohort 以及首日 `05-03` 一律标
 `'partial'`（**不放 0**）——末尾不足的 D1 分子缺失，填 0 会误导报表。
 
+### 1.8 ADS：`ads_item_behavior_daily`（每日去重商品数）
+
+一行 = 一个 UTC 日 + 三个去重商品数。来源：`dwd_events`。
+
+| 字段 | 口径 |
+| --- | --- |
+| `event_date_utc` | PK。UTC 日 |
+| `items_viewed` | 当日发生过 view 的 distinct `item_id` 数（`item_id IS NOT NULL`） |
+| `items_carted` | 当日发生过 add_to_cart 的 distinct `item_id` 数 |
+| `items_bought` | 当日发生过 transaction 的 distinct `item_id` 数 |
+| `is_full_day` | `1` = 完整自然日；`0` = 部分日（05-03 / 09-18） |
+| `build_id` / `loaded_at` | 血缘 |
+
+> **Phase 7 R16 新增**：此前「商品行为 KPI 卡」由视图 `v_ads_item_behavior_daily`
+> 每次查询都对 `dwd_events` 做 `COUNT(DISTINCT CASE...) GROUP BY event_date_utc`
+> 全程扫描（冷启动实测 ~10s，6 张 KPI 叠加超过前端 60s 超时 → `Waiting on` /
+> `No results`）。现物化为本物理表：随 DWS/ADS 构建按日幂等重建，视图退化为薄
+> 列投影（冷启动 ~0.00s），图源只读不影响。
+> **跨日求和语义**：三个量都是 per-day distinct item_id，跨日求和会重复计数 ——
+> 图表口径标注「每日商品数」而非「区间商品数」，不跨日累加。
+
+### 1.9 ADS：`ads_funnel_interval`（窗口级区间漏斗）
+
+一行 = 完整构建窗口的区间漏斗汇总（PK 固定 `id=1`）。来源：`dwd_events`。
+
+| 字段 | 口径 |
+| --- | --- |
+| `window_start` / `window_end` | 聚合窗口（生产 FULL = `[2015-05-04, 2015-09-17]`） |
+| `view_users` | 窗口内发生过 view 的去重访客数（区间 UV） |
+| `cart_users` | 窗口内发生过 add_to_cart 的去重访客数（口径 A 分子） |
+| `buyer_users` | 窗口内发生过 transaction 的去重访客数 |
+| `orders` | `COUNT(DISTINCT transaction_id)`（全局订单数，不跨行求和） |
+| `conv_strict_users` | 交易访客 ∩ 浏览访客（严格漏斗分子） |
+| `conv_global_users` | 全部交易访客（全局口径分子，可 > 分母） |
+| `add_to_cart_rate` / `conv_strict_rate` / `conv_global_rate` | `分子/分母`，分母 0 → NULL |
+| `build_id` / `loaded_at` | 血缘 |
+
+> **Phase 7 R16 新增**：此前运营看板 6 张 KPI 卡都读视图
+> `v_ads_funnel_interval`，每次查询都对 `dwd_events` 做逐访客 MAX/SUM 全窗口扫描
+> （冷启动实测 ~9.3s）。现物化为本物理表，**仅在 FULL 构建时重建**（口径依赖完整
+> 窗口；DATES 构建不动它），视图退化为薄列投影（冷启动 ~0.00s）。glob 语义：
+> `conv_global_users >= conv_strict_users`，`conv_global_rate` 可 >100%（合法）。
+> 生产实测见 §8.3 区间口径表，逐项与视图时代完全一致（verify ALL MATCH）。
+
 ## 2. 构建 SQL（SQL-first，服务端聚合）
 
 所有聚合语句位于 `src/ecommerce_dw/dws/agg_sql.py`，一律 `INSERT INTO <表> SELECT`
@@ -162,9 +207,11 @@ tmp_agg_days（scope 日）
   ├─ dws_item_daily            ← dwd_events
   ├─ dws_category_daily        ← dwd_events + tmp_item_category(as-of 映射，三张临时表)
   ├─ ads_traffic_daily         ← dws_user_daily
-  └─ ads_funnel_daily          ← dws_user_daily(tmp_funnel_day) + dwd_events(orders)
-     ads_item_ranking_daily    ← dws_item_daily
-     ads_retention_cohort      ← dwd_events（全量窗口）
+  ├─ ads_funnel_daily          ← dws_user_daily(tmp_funnel_day) + dwd_events(orders)
+  ├─ ads_item_ranking_daily    ← dws_item_daily
+  ├─ ads_retention_cohort      ← dwd_events（全量窗口）
+  └─ ads_item_behavior_daily   ← dwd_events（按 scope 日的每日去重商品数，恒建）
+     ads_funnel_interval       ← dwd_events（窗口级区间漏斗，**仅 FULL 构建**）
 ```
 
 ### 2.2 MySQL CTE / 临时表的一次引用约束
@@ -195,7 +242,7 @@ MySQL **不允许同一语句内重开派生表**（`insert ... select` 中一�
 | | FULL | DATES |
 | --- | --- | --- |
 | 覆盖 | 全部 `dwd_events` 日 | 指定 UTC 日集合（`--dates 2015-05-04,...`） |
-| delete-scope | 7 张输出表整表清空 | 日键表 `WHERE event_date_utc IN (...)`；留存表 `WHERE cohort_date IN (...)`（**cohort 日 = 重建日，不扩展**） |
+| delete-scope | 9 张输出表整表清空 | 日键表 `WHERE event_date_utc IN (...)`；留存表 `WHERE cohort_date IN (...)`（**cohort 日 = 重建日，不扩展**）；`ads_funnel_interval` **永不**在 DATES 下触碰（FULL-only 表） |
 | 用途 | 首次构建 / 口径升级（`AGG_VERSION` 变更） | 补数、修数 |
 
 幂等保证：某 scope 的 `dates_csv` 恒定（`Scope` 归一排序去重），同一 scope 重复
@@ -218,7 +265,7 @@ MySQL **不允许同一语句内重开派生表**（`insert ... select` 中一�
 `etl_batch_log` 以「源文件 + SHA-256」为幂等键（文件批幂等）；`dwd_build_log` 以
 「transform 版本 + ok/duplicate/reject 三分类计数」为语义。DWS/ADS 构建**读的是
 `dwd_events`（已标准化）**，幂等键是「scope（FULL 或 UTC 日集合）」而非文件，且
-一次性写 7 张输出表，需要「每张表写了几行」的 JSON 计数与
+一次性写 9 张输出表，需要「每张表写了几行」的 JSON 计数与
 `RUNNING → LOADED | FAILED → CLEANED` 状态机。所以独立建 `dws_ads_build_log`
 （`sql/ddl/dws_ads_build_log.sql`），与 DWD 日志通过单据血缘分离、互不混淆。
 
@@ -230,7 +277,10 @@ MySQL **不允许同一语句内重开派生表**（`insert ... select` 中一�
 2. `ads_funnel_daily.conv_global_users == buyer_users`（同一集合两条口径名）；
 3. `conv_strict_users <= conv_global_users`（严格 ⊂ 全局，子集不变量）；
 4. 留存 `age_day=0`：`retained_users == cohort_size` 且 `retention_rate == 1`；
-5. 各表在 scope 内的行数与构建声称一致（row parity）。
+5. 各表在 scope 内的行数与构建声称一致（row parity）；
+6. **区间漏斗**（FULL 语义）与**商品行为表**的独立复核（`_INTERVAL_DIRECT_SQL` /
+   `_ITEM_BEHAVIOR_DIRECT_SQL`，见 §6.2）——结果并入构建的 MetricCheck，任一
+   超出容差 → FAILED。
 
 ### 6.2 `verify`：独立 SQL 复算（`verify_dws_ads`）
 
@@ -247,6 +297,8 @@ MySQL **不允许同一语句内重开派生表**（`insert ... select` 中一�
 | `conv_strict_users` | 先各取 view/交易去重集合再同人同日 JOIN（构建是用户行双列同时 >0） |
 | 三个 rate | 由独立分子分母现算（`denom=0 → NULL` 与构建一致） |
 | `retention_d1` | `MIN(event_date_utc)` cohort + 次日足迹 LEFT JOIN（构建是 CTE 交） |
+| `ads_item_behavior_daily.*` | 逐日 `COUNT(DISTINCT CASE WHEN ...)`（绕过 `tmp_agg_days` 的 JOIN 写法，直接按 `event_date_utc` 分组；不区分 FULL/DATES 窗口，全 139 日都复核） |
+| `ads_funnel_interval.*`（7 项 window 指标 + join-intersect 的 conv_strict） | 对完整窗口做 7 组「窗对标量子查询」（`SUM(v.viewed)` 等独立编写；`conv_strict` 用独立 JOIN 求交集再计数） |
 
 比对容差：**按列刻度感知**——比率列 `DECIMAL(...,6)` 存值（如 `0.333333`）与精确商
 相差可达 5e-7，整数指标精确到 1e-9 也自动通过；统一容差 `< 1e-6`。`None` 与 `None`
@@ -275,8 +327,9 @@ MySQL **不允许同一语句内重开派生表**（`insert ... select` 中一�
 
 ### 8.1 全量构建结果
 
-全量构建 **build #1（FULL，LOADED）**，`AGG_VERSION=1`，累计 **3,431,482 行**
-跨 7 张输出表。
+全量构建 **build #8（FULL，LOADED）**，`AGG_VERSION=1`，累计 **3,431,622 行**
+跨 9 张输出表（7 张原有表行数与 Phase 4 基线 build #1 完全一致：3,431,482；
+新增 2 张合计 +140）。
 
 | 表 | 行数 | 说明 |
 | --- | --- | --- |
@@ -287,6 +340,8 @@ MySQL **不允许同一语句内重开派生表**（`insert ... select` 中一�
 | `ads_funnel_daily` | 1,251 | 139 日 × 9 指标 |
 | `ads_item_ranking_daily` | 13,900 | 139 日 × 每日 Top-100 |
 | `ads_retention_cohort` | 278 | 139 cohort × 2 年龄日 |
+| `ads_item_behavior_daily` | 139 | 日 × 1（R16 新增物化表） |
+| `ads_funnel_interval` | 1 | 单窗一行（R16 新增物化表，FULL-only） |
 
 **类目 as-of 的一个可观察后果**：`categoryid` 属性快照最早出现在 2015-05-10，
 故 **7 天**（05-04 ~ 05-10）的全部事件都落到未分类桶 `category_id=0`（当日唯一
@@ -364,10 +419,10 @@ conv_global_users 101 / conv_strict_rate 0.008913 / conv_global_rate 0.009186。
 
 | 项 | 值 |
 | --- | --- |
-| 全量构建 build_id / status | **build #1（FULL，LOADED）**，AGG_VERSION=1 |
-| 构建时长 | **164.53s**（2 分 45 秒，含 7 张表 + 构建内不变量校验） |
-| `verify` 独立复算 | **1,668 checks / 139 天，ALL MATCH（0 差异）** |
-| 构建内不变量（1~5） | 全部通过（uv==view_users、conv_global==buyer、strict⊆global、age0 恒等、row parity） |
+| 全量构建 build_id / status | **build #8（FULL，LOADED）**，AGG_VERSION=1 |
+| 构建时长 | **555.7s**（9 分 16 秒，含 9 张表 + 构建内不变量校验；Phase 4 第一阶段为 build #1 7 张表 164.53s，本时长含新增物化表与逐日/区间复核） |
+| `verify` 独立复算 | **2,094 checks / 139 天，ALL MATCH（0 差异）**（原 1,668 + 商品行为逐日 417 + 区间漏斗 9） |
+| 构建内不变量（1~6） | 全部通过（uv==view_users、conv_global==buyer、strict⊆global、age0 恒等、row parity、区间/商品行为 独立复核） |
 | 幂等验证 | **生产实测**：build #1（FULL）后对 2015-07-26 跑 DATES 重建（build #2），7 张表当日行数逐一不变（17,516 / 13,531 / 720 / 1 / 9 / 100 / 2），`verify --dates 2015-07-26` 12 checks ALL MATCH；集成测试另覆盖同 scope 重建内容一致的断言 |
 
 ### 8.7 每个 ADS 值的可复现 SQL

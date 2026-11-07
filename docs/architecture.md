@@ -103,9 +103,11 @@ Airflow 的非业务状态（DAG 运行记录、XCom、控制表引用）存于 
 - **Phase 6 ✅ 已完成**：Airflow 编排与 DAG 开发（LocalExecutor + PostgreSQL
   元数据库；设计、参数/回填手册、故障排查与实测证据见 `docs/airflow_design.md`）。
 - **Phase 7 ✅ 已完成**：Superset 看板（独立元库 `superset_meta`；只读账号
-  `superset_ro` 仅 SELECT 4 张 ADS 表 + 5 张受控视图；`apache/superset:4.1.2`
+  `superset_ro` 仅 SELECT 6 张 ADS 表 + 5 张受控视图；`apache/superset:4.1.2`
   镜像 + 最小 Dockerfile；3 个看板 21 张图 + 原生筛选器；一条命令从空元库
-  重建——设计/口径/验收证据见 `docs/superset_design.md`）。
+  重建——设计/口径/验收证据见 `docs/superset_design.md`；Phase 7 R16 返工把区间
+  漏斗 / 每日商品行为物化为 ADS 物理表并把图源冷启动压到 ~0.00s、修加购率空态、
+  截图带硬断言、发布门禁加作用域守卫）。
 - **Phase 8**：测试、性能与交付（V1.0）。
 - **Phase 9**：Kafka + Flink 实时扩展（`streaming/` 目录落地）。
 - **Phase 10**：Spark 批处理（可选）。
@@ -128,6 +130,7 @@ Airflow 的非业务状态（DAG 运行记录、XCom、控制表引用）存于 
 - **Phase 7 已验证（实测）**：`ecommerce-superset:4.1.2` 镜像构建成功；
   `superset-init` 退出码 0（建 `superset_meta` 库 + alembic 迁移 + 幂等 admin +
   导入看板包 + 修正连接口令）；`superset` 容器 healthy、`superset version` = `4.1.2`；
-  `superset_ro` SHOW GRANTS 仅 SELECT 4 张 ADS 表 + 5 张受控视图；三个看板
+  `superset_ro` SHOW GRANTS 仅 SELECT 6 张 ADS 表 + 5 张受控视图；三个看板
   dashboard_slices = 11 / 5 / 5；5 项关键指标与直连 SQL ALL MATCH；原生筛选器
-  before/after 与发布刷新均有 UI 实测截图——证据与命令见 `docs/superset_design.md` §9。
+  before/after 与发布刷新均有 UI 实测截图（Phase 7 R16 起带硬断言：任何
+  `Waiting on` / `No results` → exit 1）——证据与命令见 `docs/superset_design.md` §9。

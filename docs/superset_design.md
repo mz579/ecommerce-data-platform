@@ -12,7 +12,7 @@
 Windows 11 ── localhost:8088 ──► Superset 4.1.2（容器，ecommerce-superset）
                                      │  ├─ 元数据库：PostgreSQL 独立库 superset_meta
                                      │  └─ 业务连接：MySQL only-read 账号 superset_ro
-                                     │        └─ 仅授权 4 张 ADS 应用表 + 5 张受控视图
+                                     │        └─ 仅授权 6 张 ADS 应用表 + 5 张受控视图
 MySQL（业务数仓 ecommerce_dw） ◄── superset_ro（SELECT 白名单）
 PostgreSQL（元数据库 meta + superset_meta） ◄── superset 元数据（隔离于 Airflow meta）
 ```
@@ -26,7 +26,10 @@ PostgreSQL（元数据库 meta + superset_meta） ◄── superset 元数据�
 ## 2. 访问控制（只读）
 
 - Superset **不直连 `ecom_app`**。业务连接使用独立只读账号 `superset_ro`，
-  权限为 **4 张 ADS 应用表 + 5 张受控视图**（`SHOW GRANTS` 实测见 §9.2）。
+  权限为 **6 张 ADS 应用表 + 5 张受控视图**（`SHOW GRANTS` 实测见 §9.2）。
+  新增的两张（`ads_funnel_interval`、`ads_item_behavior_daily`）是 Phase 7 R16
+  物化的昂贵窗口/按日聚合表：随 DWS/ADS 构建链幂等重建，把 Superset 冷启动口径
+  SQL 从 ~9~10s 压到 ~0.00s（见 §9.10）。
 - 受控视图（`sql/ddl/ads_views/`）：`v_ads_funnel_interval`、
   `v_ads_category_daily`、`v_ads_item_behavior_daily`、`v_ads_item_orders_daily`、
   `v_ads_publish_status`；`ads_publish_log` 控制表不对 `superset_ro` 开放
@@ -112,10 +115,24 @@ docker compose up -d --force-recreate superset-init && docker compose up -d supe
 ## 8. 刷新与新鲜度
 
 - 看板数据来自 ADS 汇总表 + 受控视图，由 Airflow 日任务链更新；
-  刷新链路：`python -m ecommerce_dw.cli publish --run 5`（真实跑一次发布，
-  在 `ads_publish_log` 新增一行）→ 商品分析看板的「累计发布次数」KPI 立即 +1。
+  刷新链路：`python -m ecommerce_dw.cli publish --dates 2015-09-16,2015-09-17 --run 5`
+  （真实跑一次发布，在 `ads_publish_log` 新增一行）→ 商品分析看板的「累计发布次数」
+  KPI 立即 +1。
+- **Phase 7 R16 门禁作用域规则**：发布的作用域必须与其背书的 PASS 质量门禁一致 ——
+  FULL 发布需要 FULL 作用域 PASS 门禁；DATES 发布需要 DATES 作用域且日期集合完全一致
+  的 PASS 门禁；不匹配则拒绝并 exit 2。这里 `--run 5` 是一次 DATES 门禁，其
+  `dates_csv` 正好是 `2015-09-16,2015-09-17`，所以刷新演示请求同日期集合的
+  DATES 发布：`--dates 2015-09-16,2015-09-17`（FULL 发布 / 其它日期集会在此规则下被拒）。
+  实现：`validate_publish_scope()`（纯函数）+ `publish_ads_scope` 的执行守卫，单测
+  `tests/unit/test_quality_runner.py`、集成 `tests/integration/test_phase5_gate_incremental_mysql.py`
+  `test_publish_gate_scope_enforcement`（正/反例都覆盖）。
 - 每次发布都写 `ads_publish_log` 审计行，看板通过 `v_ads_publish_status`
   只读视图读取计数（不开放控制表本身）。
+- **历史发布记录（publish_id 5–9）说明**：这 5 条是门禁作用域规则上线前的
+  「证据发布」产物 —— 当时以 run #5（DATES `2015-09-16,2015-09-17` PASS）为背书
+  连续 5 次执行 FULL 作用域发布来刷看板刷新前后截图证据。在现行 R16 规则下这类
+  FULL 发布背靠 DATES 门禁会被拒绝（不会再产生）；这些审计记录**保留不删**，
+  作为回放运行时「看板数据未变化、KPI 递增」的确证。逐条明细见 §9.8。
 
 ## 9. 验收证据（实测命令 + 输出摘录）
 
@@ -132,12 +149,14 @@ wsl -d Ubuntu24.04 -- bash -lc "docker compose -f .../docker-compose.yml exec -T
 
 ### 9.2 SHOW GRANTS（superset_ro）
 
-`python scripts/apply_superset_grants.py` 幂等重跑后的实际输出（只读白名单，9 个对象）：
+`python scripts/apply_superset_grants.py` 幂等重跑后的实际输出（只读白名单，11 个对象）：
 
 ```text
 == SHOW GRANTS FOR 'superset_ro'@'%' ==
   GRANT USAGE ON *.* TO `superset_ro`@`%`
   GRANT SELECT ON `ecommerce_dw`.`ads_funnel_daily` TO `superset_ro`@`%`
+  GRANT SELECT ON `ecommerce_dw`.`ads_funnel_interval` TO `superset_ro`@`%`
+  GRANT SELECT ON `ecommerce_dw`.`ads_item_behavior_daily` TO `superset_ro`@`%`
   GRANT SELECT ON `ecommerce_dw`.`ads_item_ranking_daily` TO `superset_ro`@`%`
   GRANT SELECT ON `ecommerce_dw`.`ads_retention_cohort` TO `superset_ro`@`%`
   GRANT SELECT ON `ecommerce_dw`.`ads_traffic_daily` TO `superset_ro`@`%`
@@ -148,7 +167,8 @@ wsl -d Ubuntu24.04 -- bash -lc "docker compose -f .../docker-compose.yml exec -T
   GRANT SELECT ON `ecommerce_dw`.`v_ads_publish_status` TO `superset_ro`@`%`
 ```
 
-无任何 INSERT/UPDATE/DELETE；`ads_publish_log` 控制表不开放。
+无任何 INSERT/UPDATE/DELETE；`ads_publish_log` 控制表不开放。SUPERSET_SETUP 的数据集
+全是这些视图/表上的 `SELECT`（声明式 SQL 数据集），受上表白名单约束。
 
 ### 9.3 数据库连接（无明文口令）
 
@@ -200,43 +220,131 @@ DAU 2015-07-26                               17516           17516  True
 （与直连 SQL `86,250` 一致）；转化率线「仅严格口径」0.007467 与「两口径全选」0.007694
 数值不同 —— 严格/全局两口径分开呈现、不会混用。
 
-### 9.7 筛选器 before/after（UI 实测）
+### 9.7 R16 硬断言 UI 验收（before/after + 发布刷新）
 
-`python scripts/superset_ui_evidence.py`（Playwright 真浏览器，每次为新会话，
-先做维度筛选再做日期筛选，避免大并发重查波叠加超过前端 60s 超时）。实际输出：
+`python scripts/superset_ui_evidence.py`（Playwright 真浏览器，每次为新会话）。
+**Phase 7 R16 起带硬断言**：每一轮采集都
+1. 把每个图表面板滚动进视口（触发 IntersectionObserver 懒加载），边界轮询直到
+   「无 `Waiting on` / `No results` / `Timeout` / `trouble loading` / HTTP 错误 +
+   至少一个面板有数值」，轮询有界（默认 ≤150s）；
+2. 断言 `时间范围 / 时区 / 口径` markdown 面板存在；
+3. 任一捕获出现卡死/空面板即在结束时 exit 1（此前已保存全部 PNG 供复查）。
+
+采集序列（8 张 PNG，全含维度/日期 before-after 与发布前后）：
 
 ```text
-saved ops_overview_default.png (转化口径 before: both series)
-saved ops_overview_filter_metric.png (转化口径: strict deselected)
-    conv-trend before contains strict=True global=True   # 双系列：global + strict
-    conv-trend after  contains strict=False global=True  # 仅剩 global 单系列
-saved ops_overview_filter_date.png (date filter after   PV: 32,077)
-    date filter value-change evidence: True  (2,664,218 -> 32,077)
-saved product_analysis_after_publish.png (freshness KPI: 9)
+ops_overview_default.png            ops 默认态
+ops_overview_filter_metric_before.png   转化口径默认双系列（before）
+ops_overview_filter_metric.png          取消 conv_strict_rate 后仅全局系列（after）
+ops_overview_filter_date_before.png     日期范围默认（before）
+ops_overview_filter_date.png            日期筛选 2015-07-26 后（after）
+user_behavior_default.png           用户行为默认态
+product_analysis_before_publish.png 发布前
+product_analysis_after_publish.png  发布后（累计发布 KPI +1）
 ```
 
 - 维度筛选（转化口径）：默认双系列，取消 `conv_strict_rate` 后 only
-  `conv_global_rate` 单系列（UI 截图 + legend 文本双重验证）；
-- 日期筛选（event_date_utc / cohort_date）：ops PV `2,664,218 → 32,077`（2015-07-26）。
+  `conv_global_rate` 单系列（UI 截图 + legend 文本双重验证）。
+- 日期筛选（event_date_utc / cohort_date）：ops PV 全区间 `2,664,218`
+  → 2015-07-26 单日窗口。
+- **加购率日趋势（宕机空态修复）**：`ds_funnel_atc` 数据集 SQL 在 4.1.2 下不能暴露
+  `metric_name` 列 —— 运营看板的转化口径原生筛选器按列名匹配，会把
+  `metric_name IN ('conv_strict_rate','conv_global_rate')` 泄漏到该查询，
+  与数据集内 `metric_name='add_to_cart_rate'` 冲突 → 空集/`No results`。
+  修复分两层：(1) 数据集 SQL 不再 SELECT `metric_name`（WHERE 条件写死为
+  `metric_name = 'add_to_cart_rate'`，`scripts/superset_setup.py`
+  `FUNNEL_ATC_SQL`）；(2) **列元数据清理** —— 4.1.2 对 SQL 数据集的 PUT 不会
+  收回已消失的列，残留的 `metric_name` 列仍会让原生筛选器按名匹配并泄漏语法错误
+  （外侧 `WHERE metric_name IN (...)` 引用子查询之外的列 → 1054 报错）。
+  `superset_setup.py` 的 `_prune_stale_columns()` 在每次数据集 upsert 后用
+  MySQL 引擎直觉（`SELECT * FROM (<sql>) LIMIT 0`）对照，删除 SQL 不再投影的列，
+  从根上杜绝该泄漏再犯。实测直连返回 139 行（2015-05-03..2015-09-18，无 NULL），
+  看板截图呈现趋势数据。
+- 轮询细节：不产生任何无界 sleep；超时即记为断言失败。
 
-### 9.8 刷新数据变化
+### 9.8 刷新数据变化 + 门禁作用域
 
-`python -m ecommerce_dw.cli publish --run 5` 一次后商品分析看板「累计发布次数」
-8 → 9；前后两张产品页截图对比可见 KPI 变化（§9.9）。发布链路与截至性口径见 §8。
+**发布演示（R16 门禁作用域下发合法的一例）**：
+
+```bash
+python -m ecommerce_dw.cli publish --dates 2015-09-16,2015-09-17 --run 5
+```
+
+run #5 是 DATES 作用域 PASS 门禁（`dates_csv='2015-09-16,2015-09-17'`），故发布
+请求必须同为该日期集合的 DATES 发布 —— 门禁作用域守卫放行，`ads_publish_log`
+追加 1 行，商品分析看板「累计发布次数」+1；前后两张产品页截图可见 KPI 变化（§9.9）。
+
+**门禁作用域守卫（正/反例）**：
+
+| 发布请求 | 背书门禁（run） | 结果（允许/拒绝） |
+| --- | --- | --- |
+| FULL | FULL PASS | allowed |
+| FULL | DATES PASS | refused（exit 2） |
+| DATES `同日期集` | DATES PASS 同日期集 | allowed（顺序无关，去重排序后比较） |
+| DATES 窄/宽/异日期集 | DATES PASS | refused（exit 2） |
+| DATES | FULL PASS | refused（exit 2） |
+
+实现：`validate_publish_scope()`（纯函数）；单测 `tests/unit/test_quality_runner.py`；
+集成 `tests/integration/test_phase5_gate_incremental_mysql.py` →
+`test_publish_gate_scope_enforcement`（含拒绝后 `ads_publish_log` 不增长的断言）。
+
+**publish_id 5–9 出处审计表**（R16 要求：不得删除审计记录，说明来源）：
+
+| publish_id | scope_type | dates_csv | quality_run_id | **说明** |
+| --- | --- | --- | --- | --- |
+| 1–2 | FULL | — | run 1、run 2 | 早期全量发布（上线前证据），门禁作用域规则前的合法产物 |
+| 3–4 | DATES | `2015-09-16,2015-09-17` | run 4、run 5 | 第一次刷新演示（DATES，与 run 5 恰好一致），仍合法 |
+| 5–9 | FULL | — | run 5 | **证据发布**：门禁作用域规则上线之前，以 run #5 为背书连续 5 次执行 FULL 发布，用于回放验证刷新前后截图；现行规则下 FULL↔DATES 会被拒（见上表），故该类记录不会再新增；历史行保留不删 |
+| 10–12 | DATES | `2015-09-16,2015-09-17` | run 5 | R16 验收的三轮刷新演示（R16 硬断言证据脚本内跑的真实 CLI 发布，publish_id 10/11/12），规则下合法，构成要求「只增不改」 |
+
+> 截止本验收快照：`ads_publish_log` 共 12 行。1–4、10–12 在现行规则下均合法；
+> 5–9 为历史证据发布，保留不删（见 §8）。刷新演示当前指向最新 publish_id 12。
 
 ### 9.9 截图（真实渲染）
 
-`dashboards/screenshots/`（6 张，均来自 `superset_ui_evidence.py` /
-`superset_screenshots.py` 的真实 Chromium 渲染）：
+`dashboards/screenshots/`（8 张，均来自 `superset_ui_evidence.py` 的真实 Chromium
+渲染，随 R16 硬断言：任何 `Waiting on` / `No results` 空洞都会让脚本 exit 1）：
 
 | 文件 | 内容 |
 | --- | --- |
-| `ops_overview_default.png` | 运营总览默认态：KPI 行 + 双口径双系列 |
-| `ops_overview_filter_date.png` | 日期筛选 2015-07-26 后：PV 32,077 |
+| `ops_overview_default.png` | 运营总览默认态：KPI 行 + 双口径双系列 + 加购率趋势有数据 |
+| `ops_overview_filter_metric_before.png` | 转化口径默认双系列（before） |
 | `ops_overview_filter_metric.png` | 转化口径取消「严格」后：仅全局系列 |
+| `ops_overview_filter_date_before.png` | 日期范围默认（before） |
+| `ops_overview_filter_date.png` | 日期筛选 2015-07-26 后：PV 32,077 |
 | `user_behavior_default.png` | 用户行为默认态 |
-| `product_analysis_before_publish.png` | 商品分析刷新前：累计发布 8 |
-| `product_analysis_after_publish.png` | 商品分析刷新后：累计发布 9 |
+| `product_analysis_before_publish.png` | 商品分析发布前：累计发布 N |
+| `product_analysis_after_publish.png` | 商品分析发布后：累计发布 N+1 |
+
+### 9.10 图源冷启动耗时（物化前后，数据库侧实测）
+
+以 `superset_ro` 账号直接执行每个图表的数据源查询 2 次（冷启动）计时。
+R16 前测量抓到的根因（6 张 KPI 卡 × ~9s 叠加 > 前端 60s 超时 → `Waiting on` /
+`No results`），R16 物化后同一图源：
+
+| 图源（图表读取的查询） | R16 前 | R16 后 cold#1 / cold#2 | 行数 |
+| --- | --- | --- | --- |
+| `v_ads_funnel_interval`（6 张区间 KPI 卡） | 9.61s / 9.16s | **0.003s / 0.001s** | 1 |
+| `v_ads_item_behavior_daily`（商品行为 KPI 卡） | 10.17s / 10.02s | **0.002s / 0.001s** | 139 |
+| `v_ads_item_orders_daily`（TOP 商品表·单日） | 0.00s | 0.002s / 0.001s | 20 |
+| `ads_traffic_daily`（PV/UV/DAU 卡 + 趋势线） | 0.00s | 0.001s / 0.001s | 139 |
+| `ads_funnel_daily`（转化率/加购率趋势线） | 0.00s | 0.005s / 0.004s | 1,251 |
+| 新增物理表 `ads_funnel_interval` | — | 0.001s / 0.001s | 1 |
+| 新增物理表 `ads_item_behavior_daily` | — | 0.001s / 0.001s | 139 |
+
+复测脚本：`C:\Zproject\ZClaude\probe\ph7_timings_after.py`（属本机工具，不在仓库；
+仓库内证据链见 §9.6 与 `scripts/superset_ui_evidence.py` 的硬断言截图）。
+
+物化细节（口径由 DWS/ADS 构建链保证，`superset_ro` 仍只见视图/表上的 SELECT）：
+- `ads_funnel_interval`：窗口级区间漏斗单行（`view_users/cart_users/buyer_users/
+  orders/conv_strict_users/conv_global_users` + 三个比率），INSERT..SELECT 服务端
+  聚合，FULL 构建时重建（`dws`/`verify` 均有独立复核断言）；
+  DDL `sql/ddl/ads_funnel_interval.sql`。
+- `ads_item_behavior_daily`：按 UTC 日的去重商品数（view/add_to_cart/transaction），
+  随构建按日幂等重建；DDL `sql/ddl/ads_item_behavior_daily.sql`。
+- 两张表的每一行都有 `build_id + loaded_at` 血缘；`verify` 从 `dwd_events`
+  独立重算（含 139 日 × 3 项 = 417 项逐日断言 + 区间 9 项），与构建结果 ALL MATCH
+  后才认为该构建通过（见 `docs/dws_ads_design.md` §6）。
 
 ## 10. 被否决的备选方案
 
@@ -253,9 +361,16 @@ saved product_analysis_after_publish.png (freshness KPI: 9)
 
 ## 11. 相关文件
 
-- `scripts/superset_setup.py` —— 声明式 upsert（DB/数据集/图表/看板/导出）
+- `scripts/superset_setup.py` —— 声明式 upsert（DB/数据集/图表/看板/导出）；
+  内含 R16 加购率数据集修复（`FUNNEL_ATC_SQL` 不暴露 `metric_name` 列）
 - `scripts/superset_evidence.py` —— 指标一致性验收
-- `scripts/superset_ui_evidence.py` —— 筛选器 before/after UI 验收
-- `scripts/superset_screenshots.py` —— 真实渲染截图
+- `scripts/superset_ui_evidence.py` —— R16 硬断言 UI 验收（before/after + 发布刷新）
+- `scripts/superset_screenshots.py` —— 真实渲染截图（复用硬断言 helper）
+- `sql/ddl/ads_funnel_interval.sql`、`sql/ddl/ads_item_behavior_daily.sql` —— R16 物化表
+- `sql/ddl/ads_views/v_ads_funnel_interval.sql`、`v_ads_item_behavior_daily.sql` —— 薄视图
+- `src/ecommerce_dw/dws/agg_sql.py`、`builder.py` —— 物化构建 + verify 独立复核
+- `src/ecommerce_dw/quality/runner.py` —— `validate_publish_scope` 门禁作用域守卫
+- `tests/unit/test_quality_runner.py` —— 门禁作用域单测（正/反例）
+- `tests/integration/test_phase5_gate_incremental_mysql.py` —— 构建/门禁作用域集成
 - `docker/superset/{Dockerfile,init.sh,superset_config.py,fix_database_password.py}`
 - `dashboards/exports/`、`dashboards/screenshots/`
