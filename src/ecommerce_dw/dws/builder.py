@@ -8,11 +8,14 @@ Implements the design in ``docs/dws_ads_design.md``:
 - **scope = temp day table**: both FULL and DATES scopes materialize the UTC
   days under build into ``tmp_agg_days`` and every statement joins it, so the
   two scopes share one code path and statements stay positionally parameterized.
-- **idempotent**: a scope rebuild deletes the scope from the seven output tables
+- **idempotent**: a scope rebuild deletes the scope from the output tables
   first, then re-inserts deterministically; re-running a LOADED scope is allowed
   and reproduces identical content (volatile lineage columns aside).
 - **actual/per-day rebuild**: ``--dates`` covers the same day set for DWS/ADS
   day tables and the same cohort dates for retention.
+- **interval single-row table**: ``ads_funnel_interval`` (Phase 7 R16) is the
+  full-window user-funnel materialized into one row; it is only rebuilt on a
+  FULL scope and is left untouched by DATES builds.
 - **audited**: every run registers a ``dws_ads_build_log`` row (per-table row
   counts as JSON) and verifies invariants against the ADS output before marking
   LOADED. ``verify_dws_ads`` rechecks every metric with independent SQL written
@@ -51,10 +54,17 @@ _OUTPUT_TABLES = (
     "ads_funnel_daily",
     "ads_item_ranking_daily",
     "ads_retention_cohort",
+    "ads_item_behavior_daily",
+    "ads_funnel_interval",
 )
 _REQUIRED_TABLES = _OUTPUT_TABLES + ("dws_ads_build_log",)
-# Tables whose grain day column is event_date_utc (retention uses cohort_date).
-_DAY_KEYED_TABLES = tuple(t for t in _OUTPUT_TABLES if t != "ads_retention_cohort")
+# Tables whose grain day column is event_date_utc (retention uses cohort_date;
+# the interval funnel is a single window row, never day-keyed).
+_DAY_KEYED_TABLES = tuple(
+    t for t in _OUTPUT_TABLES if t not in ("ads_retention_cohort", "ads_funnel_interval")
+)
+# The one-row full-window funnel is FULL-only; DATES builds must not touch it.
+_INTERVAL_TABLE = "ads_funnel_interval"
 
 
 class AggBuildError(RuntimeError):
@@ -130,8 +140,9 @@ def build_dws_ads(
 ) -> AggBuildResult:
     """Build (or rebuild) the DWS/ADS layers for the requested scope.
 
-    - ``dates`` empty/None -> FULL rebuild of all seven output tables.
-    - otherwise the given UTC days are rebuilt; other days are preserved.
+    - ``dates`` empty/None -> FULL rebuild of all output tables (including the
+      single-row interval funnel); otherwise the given UTC days are rebuilt and
+      the interval funnel is preserved untouched.
     - ``top_n`` limits rows in ``ads_item_ranking_daily`` per day.
     - ``force=True`` discards an existing failed/crashed build for the scope.
     - ``window_start`` / ``window_end`` define the "full window" used for the
@@ -184,6 +195,7 @@ def build_dws_ads(
             top_n=top_n,
             window_start=window_start,
             window_end=window_end,
+            scope=scope,
         )
         _verify_build(conn, scope, table_stats)
         duration = time.monotonic() - dur_start
@@ -239,7 +251,12 @@ def _list_table_names(conn: pymysql.connections.Connection) -> set[str]:
 
 
 def _delete_scope_rows(conn: pymysql.connections.Connection, scope: Scope) -> None:
-    """Wipe the scope from the seven output tables before a fresh rebuild."""
+    """Wipe the scope before a fresh rebuild.
+
+    FULL wipes every output table; DATES wipes only the day-keyed rows (and the
+    same cohort dates for retention) and never touches ads_funnel_interval — the
+    single-row window table is rebuilt by FULL scopes only.
+    """
     cursor = conn.cursor()
     try:
         if scope.scope_type == "FULL":
@@ -281,8 +298,9 @@ def _build_all_tables(
     top_n: int,
     window_start: date,
     window_end: date,
+    scope: Scope,
 ) -> dict[str, int]:
-    """Run the seven output-table builds in dependency order; return per-table rows."""
+    """Run the nine output-table builds in dependency order; return per-table rows."""
     stats: dict[str, int] = {}
 
     stats["dws_user_daily"] = _exec_insert(
@@ -329,6 +347,24 @@ def _build_all_tables(
         agg_sql.retention_params(build_id, loaded_at, window_start, window_end),
     )
     logger.info("ads_retention_cohort <- %s rows", stats["ads_retention_cohort"])
+
+    stats["ads_item_behavior_daily"] = _exec_insert(
+        conn,
+        agg_sql.insert_item_behavior_daily_sql(),
+        agg_sql.base_params(build_id, loaded_at, window_start, window_end),
+    )
+    logger.info("ads_item_behavior_daily <- %s rows", stats["ads_item_behavior_daily"])
+
+    # The single-row interval funnel is FULL-window only: it aggregates the whole
+    # window and would be wrong to rebuild from a partial day set, so DATES
+    # scopes leave the previously built row (and its build_id lineage) intact.
+    if scope.scope_type == "FULL":
+        stats[_INTERVAL_TABLE] = _exec_insert(
+            conn,
+            agg_sql.insert_funnel_interval_sql(),
+            agg_sql.funnel_interval_params(build_id, loaded_at, window_start, window_end),
+        )
+        logger.info("ads_funnel_interval <- %s rows", stats[_INTERVAL_TABLE])
 
     return stats
 
@@ -476,12 +512,16 @@ def _verify_build(
             )
 
         # 5) expected per-table row parity: re-count built rows for the scope.
+        #    ads_funnel_interval is a single window row with no day key; it only
+        #    appears in table_stats on FULL scopes, so the plain table count matches.
         for table, written in table_stats.items():
             if table == "ads_retention_cohort":
                 cursor.execute(
                     "SELECT COUNT(*) FROM ads_retention_cohort "
                     "JOIN tmp_agg_days d ON d.event_date_utc = ads_retention_cohort.cohort_date"
                 )
+            elif table == "ads_funnel_interval":
+                cursor.execute("SELECT COUNT(*) FROM ads_funnel_interval")
             else:
                 cursor.execute(
                     f"SELECT COUNT(*) FROM `{table}` "
@@ -492,6 +532,22 @@ def _verify_build(
                 raise AggBuildError(
                     f"row parity violated: {table} has {present} rows in scope, "
                     f"build reported {written}"
+                )
+
+        # 6) interval funnel sanity: exactly one window row, non-degenerate, and
+        #    strict conversion is a subset of the global transaction user set.
+        if scope.scope_type == "FULL":
+            cursor.execute(
+                "SELECT COUNT(*) FROM ads_funnel_interval "
+                "WHERE view_users = 0 "
+                "   OR conv_strict_users > conv_global_users "
+                "   OR add_to_cart_rate < 0 OR conv_strict_rate < 0 OR conv_global_rate < 0"
+            )
+            bad = int(cursor.fetchone()[0])
+            if bad:
+                raise AggBuildError(
+                    f"interval funnel invariant violated on {bad} row(s): "
+                    "degenerate or inconsistent window-level values"
                 )
     finally:
         cursor.close()
@@ -524,6 +580,11 @@ def cleanup_build(cfg: DbConfig, build_id: int) -> int:
 # --------------------------------------------------------------------------- #
 # independent verification (different SQL written against the source)          #
 # --------------------------------------------------------------------------- #
+
+
+def _as_float(value: object) -> float | None:
+    """float() with NULL/None preserved (for ADS metric columns)."""
+    return None if value is None else float(value)
 
 
 @dataclass(frozen=True)
@@ -613,6 +674,50 @@ LEFT JOIN (
     FROM dwd_events WHERE visitor_id IS NOT NULL
 ) r USING (visitor_id)
 GROUP BY f.cohort_date
+"""
+
+# Phase 7 R16: independent recomputation of the single-row interval funnel.
+# Written differently from the build INSERT (set-membership DISTINCT counts +
+# a join-intersect for the strict converter) so the two paths cannot copy a bug.
+_INTERVAL_DIRECT_SQL = """
+SELECT
+    (SELECT COUNT(DISTINCT visitor_id) FROM dwd_events
+      WHERE event_type = 'view' AND visitor_id IS NOT NULL
+        AND event_date_utc BETWEEN %s AND %s) AS view_users,
+    (SELECT COUNT(DISTINCT visitor_id) FROM dwd_events
+      WHERE event_type = 'add_to_cart' AND visitor_id IS NOT NULL
+        AND event_date_utc BETWEEN %s AND %s) AS cart_users,
+    (SELECT COUNT(DISTINCT visitor_id) FROM dwd_events
+      WHERE event_type = 'transaction' AND visitor_id IS NOT NULL
+        AND event_date_utc BETWEEN %s AND %s) AS buyer_users,
+    (SELECT COUNT(DISTINCT transaction_id) FROM dwd_events
+      WHERE event_type = 'transaction' AND event_date_utc BETWEEN %s AND %s) AS orders,
+    (SELECT COUNT(*) FROM (
+        SELECT DISTINCT visitor_id FROM dwd_events
+        WHERE event_type = 'view' AND visitor_id IS NOT NULL
+          AND event_date_utc BETWEEN %s AND %s
+     ) iv
+     JOIN (
+        SELECT DISTINCT visitor_id FROM dwd_events
+        WHERE event_type = 'transaction' AND visitor_id IS NOT NULL
+          AND event_date_utc BETWEEN %s AND %s
+     ) ib USING (visitor_id)) AS conv_strict_users,
+    (SELECT COUNT(DISTINCT visitor_id) FROM dwd_events
+      WHERE event_type = 'transaction' AND visitor_id IS NOT NULL
+        AND event_date_utc BETWEEN %s AND %s) AS conv_global_users
+"""
+
+# Phase 7 R16: independent per-day distinct-item counts (ads_item_behavior_daily).
+# Window-unfiltered like the day-keyed _ROW_SELECTS above, so a DATES-scoped
+# verify still compares every built day (incl. window-edge partial days).
+_ITEM_BEHAVIOR_DIRECT_SQL = """
+SELECT event_date_utc,
+       COUNT(DISTINCT CASE WHEN event_type = 'view' THEN item_id END) AS viewed,
+       COUNT(DISTINCT CASE WHEN event_type = 'add_to_cart' THEN item_id END) AS carted,
+       COUNT(DISTINCT CASE WHEN event_type = 'transaction' THEN item_id END) AS bought
+FROM dwd_events
+WHERE item_id IS NOT NULL
+GROUP BY event_date_utc
 """
 
 
@@ -709,6 +814,75 @@ def verify_dws_ads(
                     continue
                 ads_rate = None if row[3] is None else float(row[3])
                 checks.append(MetricCheck("retention_d1", row[0], ads_rate, ret_direct.get(row[0])))
+
+            # Interval funnel (single window row) vs independent recomputation.
+            cursor.execute(_INTERVAL_DIRECT_SQL, [window_start, window_end] * 7)
+            irow = cursor.fetchone()
+            if irow is not None:
+                direct_interval = {
+                    "view_users": float(irow[0]),
+                    "cart_users": float(irow[1]),
+                    "buyer_users": float(irow[2]),
+                    "orders": float(irow[3]),
+                    "conv_strict_users": float(irow[4]),
+                    "conv_global_users": float(irow[5]),
+                }
+                cursor.execute(
+                    "SELECT view_users, cart_users, buyer_users, orders, "
+                    "conv_strict_users, conv_global_users, add_to_cart_rate, "
+                    "conv_strict_rate, conv_global_rate FROM ads_funnel_interval"
+                )
+                iads = cursor.fetchone()
+                if iads is not None:
+                    for name in (
+                        "view_users", "cart_users", "buyer_users", "orders",
+                        "conv_strict_users", "conv_global_users",
+                    ):
+                        col = ("view_users", "cart_users", "buyer_users", "orders",
+                               "conv_strict_users", "conv_global_users").index(name)
+                        checks.append(MetricCheck(
+                            f"interval.{name}", window_end,
+                            _as_float(iads[col]), direct_interval[name],
+                        ))
+                    denom = direct_interval["view_users"]
+                    for name, num_key, col in (
+                        ("add_to_cart_rate", "cart_users", 6),
+                        ("conv_strict_rate", "conv_strict_users", 7),
+                        ("conv_global_rate", "conv_global_users", 8),
+                    ):
+                        num = direct_interval[num_key]
+                        expected = None if denom == 0 else num / denom
+                        checks.append(MetricCheck(
+                            f"interval.{name}", window_end, _as_float(iads[col]), expected,
+                        ))
+
+            # Daily distinct item counts (ads_item_behavior_daily) vs direct.
+            direct_items: dict[date, dict[str, float]] = {}
+            cursor.execute(_ITEM_BEHAVIOR_DIRECT_SQL)
+            for day, viewed, carted, bought in cursor.fetchall():
+                direct_items[day] = {
+                    "viewed": float(viewed), "carted": float(carted), "bought": float(bought),
+                }
+            cursor.execute(
+                "SELECT event_date_utc, items_viewed, items_carted, items_bought "
+                "FROM ads_item_behavior_daily"
+            )
+            for day, viewed, carted, bought in cursor.fetchall():
+                if day_set is not None and day not in day_set:
+                    continue
+                d = direct_items.get(day)
+                if d is None:
+                    continue
+                for name, ads_v, direct_v in (
+                    ("viewed", viewed, d["viewed"]),
+                    ("carted", carted, d["carted"]),
+                    ("bought", bought, d["bought"]),
+                ):
+                    checks.append(MetricCheck(
+                        f"item_behavior.{name}", day,
+                        None if ads_v is None else float(ads_v), direct_v,
+                    ))
+
             return AggVerifyReport(tuple(checks))
         finally:
             cursor.close()

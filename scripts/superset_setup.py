@@ -171,8 +171,12 @@ FUNNEL_CONV_SQL = (
     "FROM ads_funnel_daily\n"
     "WHERE metric_name IN ('conv_strict_rate', 'conv_global_rate')"
 )
+# 加购率（口径 A）日趋势专用数据集。注意：SELECT 必须不含 metric_name——
+# 转化口径 native filter 目标是 funnel_conv 的 metric_name 列，数据集暴露同名
+# 列时该 filter 会泄漏到本查询（WHERE metric_name IN ('conv_*')），导致与
+# 下方 metric_name='add_to_cart_rate' 冲突后返回空集（Phase 7 R16 已修复）。
 FUNNEL_ATC_SQL = (
-    "SELECT event_date_utc, metric_name, metric_value\n"
+    "SELECT event_date_utc, metric_value\n"
     "FROM ads_funnel_daily\n"
     "WHERE metric_name = 'add_to_cart_rate'"
 )
@@ -1058,6 +1062,58 @@ def _upsert_database(client: SupersetClient, existing: dict[str, int]) -> int:
     return int(db_id)
 
 
+def _prune_stale_columns(client: SupersetClient, ds_id: int, sql: str) -> None:
+    """Delete dataset columns that are NOT in the SQL's result projection.
+
+    Phase 7 R16 regression guard: when a SQL dataset's ``SELECT`` lists fewer
+    columns than before, Superset 4.1.2 keeps the vanished column in the
+    dataset metadata.  The 转化口径 native filter matches a column *by name*
+    against every dataset in the dashboard, so a stale ``metric_name`` column
+    on ``ds_funnel_atc`` re-leaks the filter's
+    ``WHERE metric_name IN ('conv_strict_rate','conv_global_rate')`` onto the
+    atc chart query -> outside-the-subquery reference to an unknown column ->
+    1054 MySQL error (previously masked as an empty set / No results).
+    Dropping any column the current SQL no longer projects closes the hole.
+
+    Column names come from the DB engine's own introspection of the SQL
+    ("SELECT * FROM (<sql>) LIMIT 0" -> cursor.description), i.e. the same
+    truth Superset uses at dataset POST time, not a string parser.
+    """
+    import pymysql
+
+    try:
+        conn = pymysql.connect(
+            host=env("MYSQL_HOST", "127.0.0.1"),
+            port=int(env("MYSQL_PORT", "3306")),
+            user=env("MYSQL_RO_USER"),
+            password=env("MYSQL_RO_PASSWORD"),
+            database=env("MYSQL_DATABASE", "ecommerce_dw"),
+            charset="utf8mb4",
+            connect_timeout=10,
+            read_timeout=30,
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT * FROM ({sql}) AS _stale LIMIT 0")
+            cols = [d[0] for d in cur.description]
+        finally:
+            conn.close()
+    except Exception as exc:  # introspection failure must not break the setup run
+        print(f"  [column-sync] introspect failed for ds #{ds_id}: {exc}")
+        return
+    _, body = client.request("GET", f"/api/v1/dataset/{ds_id}")
+    for col in body["result"]["columns"]:
+        if col["column_name"] not in cols:
+            try:
+                client.request("DELETE", f"/api/v1/dataset/{ds_id}/column/{col['id']}")
+                print(
+                    f"  [column-sync] ds #{ds_id} dropped stale column "
+                    f"{col['column_name']!r} (not in SQL projection)"
+                )
+            except Exception as exc:
+                print(f"  [column-sync] ds #{ds_id} could not drop {col['column_name']!r}: {exc}")
+
+
 def _upsert_datasets(
     client: SupersetClient,
     db_id: int,
@@ -1083,6 +1139,7 @@ def _upsert_datasets(
             ds_id = body["id"]
             print(f"  [dataset] created #{ds_id} {table_name}")
         ds_ids[key] = int(ds_id)
+        _prune_stale_columns(client, int(ds_id), sql)
     return ds_ids
 
 

@@ -57,6 +57,8 @@ _AGG_TABLES = (
     "ads_funnel_daily",
     "ads_item_ranking_daily",
     "ads_retention_cohort",
+    "ads_item_behavior_daily",
+    "ads_funnel_interval",
 )
 
 D1 = date(2099, 1, 1)
@@ -77,6 +79,8 @@ _EXPECTED_STATS = {
     "ads_funnel_daily": 36,
     "ads_item_ranking_daily": 14,
     "ads_retention_cohort": 8,
+    # DATES scope leaves the single-row interval funnel untouched (never built).
+    "ads_item_behavior_daily": 4,
 }
 
 
@@ -192,7 +196,7 @@ def _traffic(cfg) -> dict[date, tuple]:
 
 
 def _snapshot(cfg) -> list[tuple[str, list[tuple]]]:
-    """Content of the seven output tables without the volatile lineage columns."""
+    """Content of the output tables without the volatile lineage columns."""
     specs = {
         "dws_user_daily": (
             "event_date_utc, visitor_id, visitor_zero, view_cnt, add_to_cart_cnt, "
@@ -226,6 +230,10 @@ def _snapshot(cfg) -> list[tuple[str, list[tuple]]]:
         "ads_retention_cohort": (
             "cohort_date, age_day, cohort_size, retained_users, retention_rate, window_status",
             "cohort_date, age_day",
+        ),
+        "ads_item_behavior_daily": (
+            "event_date_utc, items_viewed, items_carted, items_bought, is_full_day",
+            "event_date_utc",
         ),
     }
     out: list[tuple[str, list[tuple]]] = []
@@ -479,6 +487,7 @@ def test_dws_ads_small_sample_from_dwd(cfg, tmp_path, tracked):
         "ads_funnel_daily": 9,
         "ads_item_ranking_daily": 7,
         "ads_retention_cohort": 2,
+        "ads_item_behavior_daily": 1,
     }
     # ... and the untouched days are unchanged alongside the updated D1.
     assert _traffic(cfg) == _TRAFFIC_BY_DAY

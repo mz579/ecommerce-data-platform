@@ -5,7 +5,7 @@ Creates:
      "non-ADS" surfaces Superset is allowed to read (主方案: Superset 只读
      ADS 或受控视图, see docs/superset_design.md);
   2. the least-privilege read-only account ``superset_ro`` (SELECT only on the
-     four ADS tables and the five views; nothing else);
+     six ADS tables and the five views; nothing else);
   3. prints ``SHOW GRANTS`` for evidence.
 
 The script is idempotent and safe to re-run. It connects as the root user
@@ -40,6 +40,8 @@ ADS_TABLES = (
     "ads_funnel_daily",
     "ads_item_ranking_daily",
     "ads_retention_cohort",
+    "ads_item_behavior_daily",
+    "ads_funnel_interval",
 )
 VIEWS_DIR = PROJECT_ROOT / "sql" / "ddl" / "ads_views"
 _VIEW_RE = re.compile(r"^CREATE OR REPLACE VIEW\s+(\w+)", re.IGNORECASE)

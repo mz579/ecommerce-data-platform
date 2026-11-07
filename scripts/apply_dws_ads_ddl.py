@@ -29,6 +29,8 @@ EXPECTED_TABLES = (
     "ads_funnel_daily",
     "ads_item_ranking_daily",
     "ads_retention_cohort",
+    "ads_item_behavior_daily",
+    "ads_funnel_interval",
     "dws_ads_build_log",
 )
 
@@ -62,7 +64,8 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = %s AND table_name IN (%s, %s, %s, %s, %s, %s, %s, %s) "
+                "WHERE table_schema = %s AND table_name IN "
+                "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ORDER BY table_name",
                 (cfg.database, *EXPECTED_TABLES),
             )

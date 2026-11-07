@@ -57,6 +57,8 @@ _AGG_TABLES = (
     "ads_funnel_daily",
     "ads_item_ranking_daily",
     "ads_retention_cohort",
+    "ads_item_behavior_daily",
+    "ads_funnel_interval",
 )
 
 D1 = date(2099, 1, 1)
@@ -263,11 +265,15 @@ def test_quality_gate_and_incremental_end_to_end(cfg, tmp_path, tracked):
     tracked(dwd_id=b1.build_id)
     assert (b1.ods_count, b1.ok_rows, b1.duplicate_rows, b1.reject_rows) == (19, 18, 1, 0)
 
+    # FULL build (no date list) so the single-row interval funnel is also
+    # built and exercised by _verify_build's FULL-only invariants.
     res = agg_builder.build_dws_ads(
-        cfg, dates=list(_DAYS), window_start=D1, window_end=D3, top_n=100
+        cfg, window_start=D1, window_end=D3, top_n=100
     )
     tracked(agg_id=res.build_id)
     assert res.status == "LOADED"
+    assert res.scope_type == "FULL"
+    assert res.table_stats["ads_funnel_interval"] == 1
     assert _traffic(cfg) == {
         D1: (6, 4, 5),
         D2: (2, 1, 2),
@@ -368,3 +374,69 @@ def test_quality_gate_and_incremental_end_to_end(cfg, tmp_path, tracked):
     assert r_stable.dates_built == ()
     final = run_quality_gate(cfg, catalog=_CATALOG)
     assert final.ok
+
+
+def test_publish_gate_scope_enforcement(cfg, tmp_path, tracked):
+    """Phase 7 R16: a publish must be backed by a PASS gate over the SAME scope.
+
+    Positive + negative matrix: FULL publish needs a FULL-scope gate; a DATES
+    publish needs a DATES gate covering exactly the same day set; every
+    mismatch is refused with QualityGateError and ads_publish_log is untouched.
+    """
+    file1 = _stage_events(cfg, tmp_path, _clean_sample_rows())
+    tracked(events=file1)
+    b1 = dwd_builder.build_dwd(cfg, dates=list(_DAYS), source_file=file1)
+    tracked(dwd_id=b1.build_id)
+
+    res = agg_builder.build_dws_ads(cfg, window_start=D1, window_end=D3, top_n=100)
+    tracked(agg_id=res.build_id)
+    assert res.status == "LOADED" and res.scope_type == "FULL"
+
+    # ---- FULL gate (dateless) -> PASS ----
+    full_run = run_quality_gate(cfg, catalog=_CATALOG)
+    assert full_run.scope_type == "FULL" and full_run.ok
+
+    # positive: FULL publish backed by the FULL gate
+    pid = publish_ads_scope(cfg, quality_run_id=full_run.run_id)
+    assert pid >= 1
+    assert _scalar(cfg, "SELECT COUNT(*) FROM ads_publish_log") == 1
+    assert (
+        _scalar(cfg, "SELECT scope_type FROM ads_publish_log WHERE publish_id = %s", (pid,))
+        == "FULL"
+    )
+
+    # negative: DATES publish backed by a FULL gate
+    with pytest.raises(QualityGateError) as exc:
+        publish_ads_scope(cfg, dates=(D2,), quality_run_id=full_run.run_id)
+    assert "DATES" in str(exc.value) and "FULL" in str(exc.value)
+    assert _scalar(cfg, "SELECT COUNT(*) FROM ads_publish_log") == 1  # untouched
+
+    # ---- DATES gate over (D2, D3) -> PASS (identical coverage) ----
+    dates_run = run_quality_gate(cfg, dates=(D2, D3), catalog=_CATALOG)
+    assert dates_run.scope_type == "DATES" and dates_run.ok
+
+    # negative: FULL publish backed by a DATES gate
+    with pytest.raises(QualityGateError) as exc:
+        publish_ads_scope(cfg, quality_run_id=dates_run.run_id)
+    assert "FULL" in str(exc.value)
+    assert _scalar(cfg, "SELECT COUNT(*) FROM ads_publish_log") == 1
+
+    # negative: DATES publish (D2, D3) backed by a gate over a different day set
+    early_run = run_quality_gate(cfg, dates=(D2,), catalog=_CATALOG)
+    assert early_run.ok
+    with pytest.raises(QualityGateError):
+        publish_ads_scope(cfg, dates=(D2, D3), quality_run_id=early_run.run_id)
+    assert _scalar(cfg, "SELECT COUNT(*) FROM ads_publish_log") == 1
+
+    # positive: DATES publish backed by the identical DATES gate (order-insensitive)
+    pid2 = publish_ads_scope(cfg, dates=(D3, D2), quality_run_id=dates_run.run_id)
+    assert pid2 > pid
+    assert _scalar(cfg, "SELECT COUNT(*) FROM ads_publish_log") == 2
+    assert _scalar(
+        cfg, "SELECT dates_csv FROM ads_publish_log WHERE publish_id = %s", (pid2,)
+    ) == "2099-01-02,2099-01-03"
+
+    # positive: fresh gate with no --run (dateless) backs a FULL publish
+    pid3 = publish_ads_scope(cfg, catalog=_CATALOG)
+    assert pid3 > pid2
+    assert _scalar(cfg, "SELECT COUNT(*) FROM ads_publish_log") == 3

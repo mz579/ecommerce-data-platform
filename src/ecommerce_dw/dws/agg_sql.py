@@ -346,6 +346,83 @@ def insert_item_ranking_daily_sql() -> str:
     """
 
 
+def insert_item_behavior_daily_sql() -> str:
+    """商品行为去重商品数日报：每日 view / add_to_cart / transaction 各自的
+    distinct item 数（与 v_ads_item_behavior_daily 原口径一致，仅统计
+    item_id IS NOT NULL 的事件）。is_full_day 标致与 traffic/ranking 同规则。
+    """
+    return """
+    INSERT INTO ads_item_behavior_daily
+        (event_date_utc, items_viewed, items_carted, items_bought,
+         is_full_day, build_id, loaded_at)
+    SELECT ev.event_date_utc,
+           COUNT(DISTINCT CASE WHEN ev.event_type = 'view'
+                               THEN ev.item_id END) AS items_viewed,
+           COUNT(DISTINCT CASE WHEN ev.event_type = 'add_to_cart'
+                               THEN ev.item_id END) AS items_carted,
+           COUNT(DISTINCT CASE WHEN ev.event_type = 'transaction'
+                               THEN ev.item_id END) AS items_bought,
+           CASE WHEN ev.event_date_utc BETWEEN %s AND %s THEN 1 ELSE 0 END,
+           %s AS build_id, %s AS loaded_at
+    FROM dwd_events ev
+    JOIN tmp_agg_days d ON d.event_date_utc = ev.event_date_utc
+    WHERE ev.item_id IS NOT NULL
+    GROUP BY ev.event_date_utc
+    """
+
+
+def insert_funnel_interval_sql() -> str:
+    """区间（完整窗口）用户级漏斗单行表（FULL 构建专用，id 恒为 1）。
+
+    窗口由参数 window_start / window_end 给定，与构建的完整窗口标记一致
+    （生产 = FULL_WINDOW_START/END 常量）。语义与旧 v_ads_funnel_interval 视图
+    完全一致：每位访问者折叠成 4 个 0/1 用户标志再求窗口汇总；
+    conv_strict = 交易 ∩ 浏览 = MAX(view) * MAX(transaction)；orders 在窗口内
+    对 transaction_id 全局去重。仅 FULL 构建调用；DATES 构建不触碰本表。
+    """
+    return """
+    INSERT INTO ads_funnel_interval
+        (id, window_start, window_end, view_users, cart_users, buyer_users, orders,
+         conv_strict_users, conv_global_users, add_to_cart_rate, conv_strict_rate,
+         conv_global_rate, build_id, loaded_at)
+    SELECT 1,
+           %s, %s,
+           u.view_users, u.cart_users, u.buyer_users, o.orders,
+           u.conv_strict_users, u.conv_global_users,
+           CASE WHEN u.view_users = 0 THEN NULL
+                ELSE u.cart_users / u.view_users END,
+           CASE WHEN u.view_users = 0 THEN NULL
+                ELSE u.conv_strict_users / u.view_users END,
+           CASE WHEN u.view_users = 0 THEN NULL
+                ELSE u.conv_global_users / u.view_users END,
+           %s AS build_id, %s AS loaded_at
+    FROM (
+        SELECT SUM(v.viewed) AS view_users,
+               SUM(v.carted) AS cart_users,
+               SUM(v.bought) AS buyer_users,
+               SUM(v.viewed * v.bought) AS conv_strict_users,
+               SUM(v.bought) AS conv_global_users
+        FROM (
+            SELECT visitor_id,
+                   MAX(event_type = 'view') AS viewed,
+                   MAX(event_type = 'add_to_cart') AS carted,
+                   MAX(event_type = 'transaction') AS bought
+            FROM dwd_events
+            WHERE visitor_id IS NOT NULL
+              AND event_type IN ('view', 'add_to_cart', 'transaction')
+              AND event_date_utc BETWEEN %s AND %s
+            GROUP BY visitor_id
+        ) v
+    ) u
+    CROSS JOIN (
+        SELECT COUNT(DISTINCT transaction_id) AS orders
+        FROM dwd_events
+        WHERE event_type = 'transaction'
+          AND event_date_utc BETWEEN %s AND %s
+    ) o
+    """
+
+
 def insert_retention_cohort_sql() -> str:
     """次日（及当日规模）留存 cohort：age_day ∈ {0, 1}。
 
@@ -449,3 +526,15 @@ def ranking_params(
 ) -> list:
     params = [window_start, window_end, build_id, loaded_at, top_n]
     return params
+
+
+def funnel_interval_params(
+    build_id: int,
+    loaded_at: datetime,
+    window_start: date,
+    window_end: date,
+) -> list:
+    """Params for the interval-funnel INSERT: the two window columns + lineage,
+    then the window pair twice more for the user-level and orders subqueries."""
+    return [window_start, window_end, build_id, loaded_at,
+            window_start, window_end, window_start, window_end]

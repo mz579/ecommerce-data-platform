@@ -113,6 +113,40 @@ def _scope(dates: tuple[date, ...] | None) -> tuple[str, str | None]:
     return "DATES", ",".join(d.isoformat() for d in sorted(set(dates)))
 
 
+def validate_publish_scope(
+    run_scope_type: str,
+    run_dates_csv: str | None,
+    requested_scope_type: str,
+    requested_dates_csv: str | None,
+) -> str | None:
+    """Check that a PASS gate run backs the requested publish scope.
+
+    Rule (Phase 7 R16): a FULL publish must be backed by a FULL-scope PASS run;
+    a DATES publish must be backed by a DATES-scope PASS run covering exactly
+    the same day set. Returns a human readable refusal reason, or ``None`` when
+    the publish is allowed. Pure helper so unit tests cover all combinations.
+    """
+    if requested_scope_type == "FULL":
+        if run_scope_type != "FULL":
+            return (
+                f"publish refused: requested FULL publish but gate run scope_type="
+                f"{run_scope_type!r} (FULL requires a FULL-scope PASS gate)"
+            )
+        return None
+    # requested DATES
+    if run_scope_type != "DATES":
+        return (
+            f"publish refused: requested DATES publish ({requested_dates_csv}) but gate "
+            f"run scope_type={run_scope_type!r} (DATES requires a DATES-scope PASS gate)"
+        )
+    if run_dates_csv != requested_dates_csv:
+        return (
+            f"publish refused: requested DATES publish {requested_dates_csv} but PASS "
+            f"gate run covers {run_dates_csv!r} (must cover the identical day set)"
+        )
+    return None
+
+
 def run_quality_checks(
     cfg: DbConfig,
     *,
@@ -240,26 +274,33 @@ def publish_ads_scope(
 ) -> int:
     """Publish an ADS scope, guarded by a PASSing gate run.
 
-    - with ``quality_run_id``: the referenced run must exist and be PASS, else the
-      publish is refused.
-    - without it: a fresh full gate run is executed and must pass.
+    - with ``quality_run_id``: the referenced run must exist, be PASS, AND back
+      the requested scope — a FULL publish needs a FULL-scope run, a DATES
+      publish a DATES-scope run over the identical day set (see
+      :func:`validate_publish_scope`); anything else is refused (Phase 7 R16).
+    - without it: a fresh gate run is executed in the requested scope and must pass.
     On approval one ``ads_publish_log`` row is written. Returns the publish_id.
     """
     conn = connect(cfg)
     try:
         _ensure_control_tables(conn)
         run_id = quality_run_id
+        scope_type, dates_csv = _scope(dates)
         if run_id is None:
             logger.info(
-                "publish: no --run given - running a fresh FULL quality gate "
+                "publish: no --run given - running a fresh %s quality gate "
                 "(full-scan of ODS/DWD/DWS/ADS, expect a few minutes) before writing"
-                " ads_publish_log..."
+                " ads_publish_log...",
+                scope_type,
             )
             report = run_quality_gate(cfg, dates=dates, catalog=catalog)
             run_id = report.run_id
         else:
             cur = conn.cursor()
-            cur.execute("SELECT status FROM quality_check_run WHERE run_id = %s", (run_id,))
+            cur.execute(
+                "SELECT status, scope_type, dates_csv FROM quality_check_run WHERE run_id = %s",
+                (run_id,),
+            )
             row = cur.fetchone()
             if row is None:
                 raise QualityGateError(
@@ -267,7 +308,14 @@ def publish_ads_scope(
                 )
             if row[0] != RunStatus.PASS:
                 raise QualityGateError(f"publish refused: run #{run_id} status={row[0]} (not PASS)")
-        scope_type, dates_csv = _scope(dates)
+            refusal = validate_publish_scope(
+                run_scope_type=row[1],
+                run_dates_csv=row[2],
+                requested_scope_type=scope_type,
+                requested_dates_csv=dates_csv,
+            )
+            if refusal is not None:
+                raise QualityGateError(f"{refusal} (run #{run_id})")
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO ads_publish_log"

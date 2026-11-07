@@ -313,7 +313,7 @@ def test_publish_after_gate_guards(cfg, tmp_path, tracked):
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 "DATES",
-                "2099-02-01",
+                "2099-02-01,2099-02-02",
                 D1,
                 D2,
                 "PASS",
