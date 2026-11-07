@@ -134,6 +134,12 @@ x-flink-common: &flink-common
       execution.checkpointing.mode: EXACTLY_ONCE
       execution.checkpointing.min-pause: 5s
       execution.checkpointing.timeout: 60s
+      # 作业 cancel/失败后保留 checkpoint 元数据，供 `flink run -s` 恢复。
+      # Flink 1.20 的取值只有 DELETE_ON_CANCELLATION / RETAIN_ON_CANCELLATION /
+      # NO_EXTERNALIZED_CHECKPOINTS；RETAIN_ON_CANCELLATION 的官方语义是
+      # “cancel 或失败都保留”，因此不需要也不存在单独的 RETAIN_ON_FAILURE。
+      # 保留的 checkpoint 不受 num-retained 自动清理，清理策略见设计文档 §6.3。
+      execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
     TZ: UTC
   volumes:
     - flink_checkpoints:/opt/flink/checkpoints

@@ -268,17 +268,42 @@ producer 带 sequence number，broker 拒绝重复批次。它**不保证**：
 
 | 配置 | 值 | 说明 |
 | --- | --- | --- |
-| `execution.checkpointing.interval` | `10s` | 冒烟作业实测 chk-1 用时 175 ms |
+| `execution.checkpointing.interval` | `10s` | R24 复测 chk-1 用时 65 ms |
 | `execution.checkpointing.mode` | `EXACTLY_ONCE` | 状态一致性模式；sink 非事务，端到端仍按 §5 |
 | `execution.checkpointing.min-pause` | `5s` | 避免 checkpoint 背靠背 |
 | `execution.checkpointing.timeout` | `60s` | 超时失败，不无限挂起 |
-| `state.checkpoints.num-retained` | `3` | 保留最近 3 个 |
+| `execution.checkpointing.externalized-checkpoint-retention` | `RETAIN_ON_CANCELLATION` | 作业 cancel/失败后保留 checkpoint 元数据，供 `flink run -s` 恢复 |
+| `state.checkpoints.num-retained` | `3` | 作业运行期间保留最近 3 个；**不负责清理作业终态后的 externalized checkpoint** |
 | `state.backend.type` | `hashmap` | 堆内状态 |
 | `state.checkpoints.dir` | `file:///opt/flink/checkpoints` | 命名卷 `flink_checkpoints` |
 | `state.savepoints.dir` | `file:///opt/flink/savepoints` | 命名卷 `flink_savepoints` |
 
-> 10 秒间隔对 2.76M 事件回放偏密，但状态很小（每日去重 visitor 集合），实测 checkpoint
-> 15 KB、175 ms；9.2 可调到 30–60 秒，减少小文件。保留 3 个便于恢复演练。
+> 10 秒间隔对 2.76M 事件回放偏密，但状态很小（每日去重 visitor 集合）；R24 复测
+> chk-1 端到端 65 ms、state 15,755 bytes（`_metadata` 18,286 bytes），上一轮为 175 ms /
+> 15,431 bytes。9.2 可调到 30–60 秒，减少小文件。
+
+**关于 `RETAIN_ON_FAILURE`**：Flink 1.20.1 的
+`CheckpointConfig.ExternalizedCheckpointCleanup` 只有三个取值：
+`DELETE_ON_CANCELLATION`、`RETAIN_ON_CANCELLATION`、`NO_EXTERNALIZED_CHECKPOINTS`；
+没有独立的 `RETAIN_ON_FAILURE`。官方枚举描述明确写的是
+“Checkpoint state is kept when the owning job is cancelled or fails”，
+所以 `RETAIN_ON_CANCELLATION` 同时覆盖 cancel 与失败两种终态，满足恢复演练需要。
+
+**保留 checkpoint 的清理策略**：externalized checkpoint 一旦在作业终态被保留，
+就不再受 `state.checkpoints.num-retained` 自动清理；每次 cancel/失败都会留下一个
+`<job_id>/chk-N` 目录。9.2 采用“保留最近 2 个作业目录 + 恢复验证通过后清理更旧目录”
+的人工/定时 janitor，避免无限增长：
+
+```bash
+# 只保留最近 2 个作业的 checkpoint 目录（按 mtime），旧目录删除
+docker exec ecommerce-flink-taskmanager bash -lc \
+  "find /opt/flink/checkpoints -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
+   | sort -nr | tail -n +3 | cut -d' ' -f2- | xargs -r rm -rf"
+```
+
+清理前必须确认目标作业已不需要恢复，并记录被删除的 `<job_id>`；不要对正在运行的作业
+执行该命令。业务作业的 checkpoint 可能远大于 15 KB，janitor 同时应监控
+`du -sh /opt/flink/checkpoints`。
 
 ### 6.4 状态后端与存储
 
@@ -290,16 +315,43 @@ producer 带 sequence number，broker 拒绝重复批次。它**不保证**：
   跨节点无法读取 checkpoint。
 - 命名卷在 `docker compose down`（不带 `-v`）后保留；`down -v` 会删除，等同于丢弃恢复点。
 
-### 6.5 恢复演练计划（9.2 验收执行）
+### 6.5 恢复演练（9.1 已实测，9.2 用业务作业复演）
 
-1. 提交带 Kafka source 的作业，等待至少 2 个 `COMPLETED` checkpoint；
-2. 记录 `chk-N` 路径、offset、结果表当前值；
-3. `flink stop <job_id>`（触发 savepoint）或直接 `flink cancel`（用最近 checkpoint）；
-4. `flink run -s file:/opt/flink/checkpoints/<job_id>/chk-N ...` 重新提交；
-5. 验证 REST `/jobs/<id>/checkpoints` 中 `"restored": 1`，且结果表无重复计数；
-6. 注入一条 checkpoint 之后、故障之前的事件，确认重放后被 `event_id` 去重吸收。
+R24 已用官方 `StateMachineExample.jar` 完成一次完整演练，命令与结果如下：
 
-9.1 只验证了 checkpoint 能落盘，未做恢复演练（无业务作业）。
+1. 提交作业，等待至少 1 个 `COMPLETED` checkpoint：
+   `docker exec ecommerce-flink-jobmanager flink run -d /opt/flink/examples/streaming/StateMachineExample.jar`
+   → JobID `aec223f058b9e3e3d1fe0dd95be0fc94`；chk-1 路径
+   `file:/opt/flink/checkpoints/aec223f058b9e3e3d1fe0dd95be0fc94/chk-1`。
+2. `flink cancel <job_id>`。
+3. **验证 cancel 后文件仍在**：
+   `find /opt/flink/checkpoints/<job_id> -maxdepth 3 -type f`
+   → `chk-1/_metadata 18,286 bytes`、`chk-2/_metadata 18,430 bytes`；
+   `RETAIN_ON_CANCELLATION` 生效。
+4. 用保留的 checkpoint 恢复：
+   `docker exec ecommerce-flink-jobmanager flink run -d -s file:/opt/flink/checkpoints/<job_id>/chk-1 /opt/flink/examples/streaming/StateMachineExample.jar`
+   → 新 JobID `e276a23c32968209264f2da52c4c6a80`。
+5. 验证 REST `/jobs/<new_id>/checkpoints`：
+   `"counts":{"restored":1,...}`，`latest.restored.external_path` 指向原 `chk-1`；
+   `/jobs/<new_id>` 状态 `RUNNING`。
+6. 取消恢复后的作业，保留 checkpoint 目录；`flink list` → `No running jobs`。
+
+9.2 的业务作业恢复演练在此基础上增加：
+
+1. 用 Kafka source 的作业，等待至少 2 个 `COMPLETED` checkpoint；
+2. 记录 checkpoint 路径、Kafka offset、结果表当前值；
+3. cancel（本次实测路径）或 `flink stop`（生成 savepoint，适合计划内升级）；
+4. `flink run -s <path>` 重新提交；
+5. 验证 `"restored": 1`、Kafka offset 从 checkpoint 续读、结果表无重复计数；
+6. 注入一条 checkpoint 之后、故障之前的事件，确认重放后被 `event_id` 去重吸收；
+7. 演练通过后按 §6.3 的 janitor 策略清理旧 checkpoint。
+
+> 9.1 的演练证明“cancel 后 checkpoint 仍在 + 可从 checkpoint 恢复”；业务作业的
+> Kafka offset/结果表一致性验证属于 9.2 验收项。
+> 若改用 savepoint：`flink stop <job_id>` 默认写到
+> `state.savepoints.dir`，再用 `flink run -s file:/opt/flink/savepoints/<...>` 恢复；
+> 本阶段未把 savepoint 作为默认恢复点，因为它需要额外一次 stop 操作，且 9.1 的
+> cancel+checkpoint 路径已验证可用。
 
 ## 7. 实时结果表设计（`ecommerce_rt`）
 
@@ -571,9 +623,11 @@ docker compose stop flink-taskmanager flink-jobmanager kafka
 | Kafka roundtrip | 生产 key `12345` + JSON，消费回同一消息；end offsets `0:0, 1:0, 2:1` |
 | Flink 版本 | 1.20.1，commit `cb1e7b5` |
 | Flink 集群 | 1 TaskManager，2 slots；REST `/overview` 正常 |
-| Flink 作业 | `StateMachineExample.jar`，JobID `5720285169fc32b99550ef0596e7b3e4`，RUNNING |
-| Checkpoint | `chk-1` COMPLETED，路径 `file:/opt/flink/checkpoints/5720285169fc32b99550ef0596e7b3e4/chk-1`，15,431 bytes，175 ms；`chk-2` 也已落盘 |
-| 清理 | `flink cancel` 成功；`flink list` 显示 `No running jobs` |
+| Flink 作业 | `StateMachineExample.jar`，首轮 JobID `aec223f058b9e3e3d1fe0dd95be0fc94`，RUNNING |
+| Checkpoint | `chk-1` COMPLETED，路径 `file:/opt/flink/checkpoints/aec223f058b9e3e3d1fe0dd95be0fc94/chk-1`，state 15,755 bytes / `_metadata` 18,286 bytes，65 ms；`chk-2` 也已落盘 |
+| cancel 后保留 | `flink cancel` 后 `find` 仍看到 `chk-1/_metadata` 与 `chk-2/_metadata`（RETAIN_ON_CANCELLATION 生效） |
+| checkpoint 恢复 | `flink run -d -s .../chk-1` → 新 JobID `e276a23c32968209264f2da52c4c6a80`；REST `"restored":1`，作业 RUNNING |
+| 清理 | 恢复后的作业再次 cancel；`flink list` 显示 `No running jobs`，checkpoint 文件保留 |
 | 独立结果库 | `ecommerce_rt` 已建，`utf8mb4_0900_ai_ci`，0 张表（9.2 建表） |
 | 生产基线 | 13 张表逐表 MATCH（见 §11.1） |
 | 代码质量 | `ruff check . && ruff format --check .` 全绿；`python -m pytest` exit 0 |
@@ -621,6 +675,7 @@ docker compose build flink-jobmanager flink-taskmanager
 | 单 broker RF=1 | broker 故障即不可用/丢数据 | 本地回放可接受；生产必须 3 broker + RF=3 |
 | session 集群不自动恢复作业 | WSL/容器重启后实时链路停摆 | 9.3 改 application 模式或外部 resubmit；checkpoint 保留 |
 | checkpoint 在本地卷 | 宿主盘故障即丢失恢复点 | 生产换 HDFS/S3；本地至少保留命名卷，避免 `down -v` |
+| retained checkpoint 累积 | cancel/失败后外置 checkpoint 不自动清理，长期占盘 | 按 §6.3 janitor 保留最近 2 个作业目录；监控 `du -sh /opt/flink/checkpoints` |
 | `event_id` 不稳定 | 回放重复计数，对账失败 | 回放器固定用 DWD `dedup_key` 算法；单测覆盖 |
 | 热点 key | 单分区积压 | 监控分区 lag；极端 key 盐化（仅非保序指标） |
 | schema 演进 | 消费端解析失败 | 未知主版本进 DLQ；不原地改 v1；v2 新 topic |
