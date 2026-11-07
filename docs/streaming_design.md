@@ -995,7 +995,7 @@ RT 连接固定使用只读账号 `rt_recon_ro`（`RT_RECON_RO_USER` 默认 `rt_
 | `event_id` 不稳定 | 回放重复计数，对账失败 | 回放器固定用 DWD `dedup_key` 算法；单测覆盖 |
 | 热点 key | 单分区积压 | 监控分区 lag；极端 key 盐化（仅非保序指标） |
 | schema 演进 | 消费端解析失败 | 未知主版本进 DLQ；不原地改 v1；v2 新 topic |
-| 严格转化/排行/留存未实时化 | 指标覆盖不全 | 严格转化与 7 个漏斗指标 9.3 已实时化；商品排行、留存、监控告警仍未做 |
+| 商品排行/留存/监控告警未实时化 | 指标覆盖不全 | 商品排行、留存、监控告警仍未做 |
 | 事件时间 2015 与处理时间混淆 | 延迟指标失真 | 明确 `event_time` 只做窗口、`ingest_time` 只做延迟（§3.2） |
 | `docker compose down -v` | 删除 Kafka/Flink/MySQL 卷 | 生产项目严禁 `-v`；只在 fresh overlay 清理 |
 
