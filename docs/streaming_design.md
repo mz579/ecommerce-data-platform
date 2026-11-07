@@ -1255,7 +1255,7 @@ gauge 就**冻结并重复最后读数**——第 20 批 58 个采样里只有 3
 | 真库集成测试 | `tests/integration/test_rt_upsert_mysql.py` **5 passed**：在 `ecommerce_rt_test` 临时库里执行从 Java 源码解析出的真实 upsert，验证已 final 行被非 final 写入后仍为 1；临时库用完即删 |
 | 反向验证 | 把 SQL 临时改回 `VALUES(is_final)`，同一集成测试 4 条失败 → 测试确实能抓住该缺陷 |
 | 新旧 SQL 对照 | 同一组写入：旧 SQL 结果 `is_final=0`（降级），新 SQL 结果 `is_final=1`（单调） |
-| 复现场景重跑 | 作业 A 回放 07-19 至 final，作业 B 再回放重叠的 07-18..07-19：`is_final` 保持 1，`RESULT: MONOTONIC_OK` |
+| 真机 A/B 对照 | 同一场景分别跑旧/新 jar：对已 final 的 07-25 回放 `D..D+1`（水位线过 `D+1` 但未到 `D+2`，即产生 `is_final=0` 快照）。**旧 jar → `is_final` 变 0（降级）**；**新 jar → 保持 1**；`CONCLUSION: old_downgrades=True, new_monotonic=True`（`final_fix/live_ab_proof.json`） |
 | 数据修复 | 07-19、07-25 按 watermark 恢复为 `is_final=1`（`rt_app`，只改 `is_final`）；**09-18 保持 0**（部分日） |
 | 修复后核对 | 三表非 final 日仅 `2015-09-18`；`rt_traffic_daily` 139 行/138 final、`rt_funnel_daily` 973 行/966 final、`rt_item_behavior_daily` 139 行/138 final；「watermark ≥ D+2 但 is_final=0」矛盾行 **0** |
 | 独立对账 | `INDEPENDENT_CHECK_OK`：0 覆盖缺口、0 重算差异、1,781 MATCH / 26 SKIP、`rt_late_events` 0 行 |
