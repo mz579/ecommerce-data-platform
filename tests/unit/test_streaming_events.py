@@ -83,6 +83,22 @@ def test_transaction_event_requires_and_keeps_transaction_id():
     assert events.validate_event(message).valid
 
 
+def test_transaction_id_zero_is_accepted_for_source_parity():
+    # events.csv line 271795 has transactionid=0; DWD keeps it and ADS counts it
+    # as an order, so event_v1 must be able to carry it unchanged.
+    message = _message(event_type="transaction", transaction_id=0, raw_event_type="transaction")
+    report = events.validate_event(message)
+    assert report.valid, report.reason
+    assert message["transaction_id"] == 0
+
+
+def test_negative_transaction_id_is_rejected_by_contract():
+    message = _message(event_type="transaction", transaction_id=-1)
+    report = events.validate_event(message)
+    assert not report.valid
+    assert "transaction_id" in (report.reason or "")
+
+
 def test_non_transaction_with_transaction_id_is_rejected_by_contract():
     message = _message(transaction_id=90001)
     report = events.validate_event(message)

@@ -41,6 +41,7 @@ public final class SelfTest {
         testItemDistinctCounts();
         testDedupTtl();
         testTransactionContract();
+        testIngestTimeContract();
 
         System.out.printf("%nSELFTEST passed=%d failed=%d%n", passed, failed);
         if (failed > 0) {
@@ -194,6 +195,21 @@ public final class SelfTest {
                 !EventParser.parse(json("x1", "2015-07-14T10:00:00.000Z", 1, "transaction", 10, null))
                         .isValid());
         check(
+                "transaction_id=0 accepted (dataset has one transactionid=0 row)",
+                EventParser.parse(
+                                json(
+                                        "x0",
+                                        "2015-06-15T21:36:37.081Z",
+                                        1,
+                                        "transaction",
+                                        10,
+                                        0L))
+                        .isValid());
+        check(
+                "negative transaction_id rejected",
+                !EventParser.parse(json("x4", "2015-07-14T10:00:00.000Z", 1, "transaction", 10, -1L))
+                        .isValid());
+        check(
                 "non-transaction with transaction_id rejected",
                 !EventParser.parse(json("x2", "2015-07-14T10:00:00.000Z", 1, "view", 10, 5L))
                         .isValid());
@@ -206,6 +222,55 @@ public final class SelfTest {
                                                 + "\"event_type\":\"view\",\"item_id\":10,"
                                                 + "\"transaction_id\":null}")
                                         .getBytes(StandardCharsets.UTF_8))
+                        .isValid());
+    }
+
+    private static void testIngestTimeContract() {
+        ParseOutcome valid =
+                EventParser.parse(json("ingest-ok", "2015-07-14T10:00:00.000Z", 1, "view", 10, null));
+        check(
+                "ingest_time parsed to epoch millis",
+                valid.isValid()
+                        && valid.event.ingestTime
+                                == Instant.parse("2026-11-07T00:00:00.000Z").toEpochMilli());
+        check(
+                "missing ingest_time rejected",
+                !EventParser.parse(
+                                json(
+                                        "ingest-missing",
+                                        "2015-07-14T10:00:00.000Z",
+                                        1,
+                                        "view",
+                                        10,
+                                        null,
+                                        1,
+                                        null))
+                        .isValid());
+        check(
+                "non-UTC ingest_time rejected",
+                !EventParser.parse(
+                                json(
+                                        "ingest-offset",
+                                        "2015-07-14T10:00:00.000Z",
+                                        1,
+                                        "view",
+                                        10,
+                                        null,
+                                        1,
+                                        "2026-11-07T08:00:00.000+08:00"))
+                        .isValid());
+        check(
+                "malformed ingest_time rejected",
+                !EventParser.parse(
+                                json(
+                                        "ingest-bad",
+                                        "2015-07-14T10:00:00.000Z",
+                                        1,
+                                        "view",
+                                        10,
+                                        null,
+                                        1,
+                                        "2026-11-07T25:00:00.000Z"))
                         .isValid());
     }
 
@@ -227,6 +292,28 @@ public final class SelfTest {
             long itemId,
             Long transactionId,
             int schemaVersion) {
+        return json(
+                eventId,
+                eventTime,
+                visitorId,
+                eventType,
+                itemId,
+                transactionId,
+                schemaVersion,
+                "2026-11-07T00:00:00.000Z");
+    }
+
+    private static byte[] json(
+            String eventId,
+            String eventTime,
+            Integer visitorId,
+            String eventType,
+            long itemId,
+            Long transactionId,
+            int schemaVersion,
+            String ingestTime) {
+        String ingestField =
+                ingestTime == null ? "" : "\"ingest_time\":\"" + ingestTime + "\",";
         String body =
                 "{"
                         + "\"event_id\":\""
@@ -235,7 +322,7 @@ public final class SelfTest {
                         + "\"event_time\":\""
                         + eventTime
                         + "\","
-                        + "\"ingest_time\":\"2026-11-07T00:00:00.000Z\","
+                        + ingestField
                         + "\"schema_version\":"
                         + schemaVersion
                         + ","
@@ -264,6 +351,7 @@ public final class SelfTest {
         return new Event(
                 id,
                 Instant.parse(eventTime).toEpochMilli(),
+                Instant.parse("2026-11-07T00:00:00.000Z").toEpochMilli(),
                 visitorId,
                 type,
                 itemId,

@@ -6,7 +6,9 @@ import java.io.Serializable;
  * A validated event_v1 message after JSON parsing.
  *
  * <p>Flink POJO: public fields + public no-arg constructor. {@code eventTime} is epoch
- * milliseconds in UTC (the only time field used for windows/watermarks). {@code rawJson}
+ * milliseconds in UTC (the only time field used for windows/watermarks).
+ * {@code ingestTime} is the replay-write timestamp and feeds only the
+ * {@code ingest_latency_ms} monitoring histogram — never windows or dedup. {@code rawJson}
  * keeps the original payload so the too-late side output can be persisted verbatim.
  */
 public class Event implements Serializable {
@@ -15,6 +17,7 @@ public class Event implements Serializable {
 
     public String eventId;
     public long eventTime;
+    public long ingestTime;
     public Long visitorId;
     public String eventType;
     public long itemId;
@@ -26,6 +29,7 @@ public class Event implements Serializable {
     public Event(
             String eventId,
             long eventTime,
+            long ingestTime,
             Long visitorId,
             String eventType,
             long itemId,
@@ -33,6 +37,7 @@ public class Event implements Serializable {
             String rawJson) {
         this.eventId = eventId;
         this.eventTime = eventTime;
+        this.ingestTime = ingestTime;
         this.visitorId = visitorId;
         this.eventType = eventType;
         this.itemId = itemId;

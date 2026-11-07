@@ -89,6 +89,23 @@ public final class EventParser {
             return ParseOutcome.invalid("schema: event_time: not an ISO-8601 datetime");
         }
 
+        // ingest_time is required by the event_v1 contract but never used for windows.
+        // It only feeds the ingest_latency_ms monitoring histogram (docs §3.2, §9).
+        JsonNode ingestTimeNode = root.get("ingest_time");
+        if (ingestTimeNode == null || !ingestTimeNode.isTextual()) {
+            return ParseOutcome.invalid("schema: ingest_time: not a string");
+        }
+        String ingestTimeText = ingestTimeNode.asText();
+        if (!ingestTimeText.endsWith("Z")) {
+            return ParseOutcome.invalid("schema: ingest_time: must be UTC (Z suffix)");
+        }
+        Instant ingestTime;
+        try {
+            ingestTime = Instant.parse(ingestTimeText);
+        } catch (DateTimeParseException exc) {
+            return ParseOutcome.invalid("schema: ingest_time: not an ISO-8601 datetime");
+        }
+
         Long visitorId;
         JsonNode visitorNode = root.get("visitor_id");
         if (visitorNode == null || visitorNode.isNull()) {
@@ -131,8 +148,10 @@ public final class EventParser {
                 return ParseOutcome.invalid("schema: transaction_id: not an integer");
             }
             transactionId = transactionNode.asLong();
-            if (transactionId < 1L) {
-                return ParseOutcome.invalid("schema: transaction_id: must be >= 1");
+            // 0 is a legitimate order id: the source dataset has exactly one
+            // transactionid=0 row (events.csv line 271795) and offline ADS counts it.
+            if (transactionId < 0L) {
+                return ParseOutcome.invalid("schema: transaction_id: must be >= 0");
             }
         }
         if ("transaction".equals(eventType) && transactionId == null) {
@@ -146,6 +165,7 @@ public final class EventParser {
                 new Event(
                         eventId,
                         eventTime.toEpochMilli(),
+                        ingestTime.toEpochMilli(),
                         visitorId,
                         eventType,
                         itemId,
