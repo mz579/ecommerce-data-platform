@@ -8,8 +8,8 @@
 > 交付命令（项目根目录，venv 已激活）：
 >
 > ```bash
-> python -m pytest                 # 宿主：275 passed, 1 skipped
-> bash scripts/build_flink_job.sh  # Java 自检 48 passed（同时产出作业 jar）
+> python -m pytest                 # 宿主：280 passed, 1 skipped
+> bash scripts/build_flink_job.sh  # Java 自检 59 passed（同时产出作业 jar）
 > docker compose exec -T airflow-scheduler python -m pytest tests/dag   # 5 passed
 > ruff check . && ruff format --check .                                   # 全绿
 > python scripts/demo_phase8.py    # 一键 8 步演示（见 performance.md §8）
@@ -31,10 +31,11 @@
 | 单元：批流对账（9.3） | `tests/unit/test_verify_rt.py` | 独立 SQL 文本/参数、6 位 HALF_UP 比率、分母 0 为 NULL、13 指标期望值、MATCH/DIFF/缺行判定、日期区间与表格输出、RT 三表合并、对账只读账号选择（不回退 `rt_app`） | `pytest tests/unit/test_verify_rt.py` | **20 passed** |
 | 单元：全量对账（9.4） | `tests/unit/test_reconcile_all.py` | 13 指标 MATCH/DIFF、缺实时值、部分日 SKIP（数值列 NULL）、ADS 三表合并、ADS-vs-DWD 交叉复核、比率 NULL 规则、`rt_reconciliation_daily` 幂等 upsert（含默认元组游标回归）、拒绝写非 RT 库、`--json-out` 日期序列化回归、`rt_app` 专用账号 | `pytest tests/unit/test_reconcile_all.py` | **18 passed** |
 | 单元：批量编排（9.4） | `tests/unit/test_batch_replay.py` | 批次切分/前瞻/pusher 边界/断点续跑、合成水位线事件合法性、回放 summary 解析、checkpoint 汇总、逐 operator 指标名解析、反压/延迟聚合、计数器差分吞吐（含 stale 读数折叠）、janitor 保留策略、状态脚本选作业、生产基线常量 | `pytest tests/unit/test_batch_replay.py` | **19 passed** |
-| Java 自检（9.3/9.4） | `streaming/flink-job/src/test/java/com/ecommerce/rt/SelfTest.java` | 解析校验、同 `event_id` 去重、null visitor 排除 UV/DAU、orders 用 distinct transaction_id、严格转化交集、分母 0、窗口边界、`is_final` 边界、比率舍入、商品 distinct、48h TTL、transaction 契约、`ingest_time` 契约、`transaction_id=0` 契约 | `bash scripts/build_flink_job.sh` | **48 passed / 0 failed** |
+| Java 自检（9.3/9.4） | `streaming/flink-job/src/test/java/com/ecommerce/rt/SelfTest.java` | 解析校验、同 `event_id` 去重、null visitor 排除 UV/DAU、orders 用 distinct transaction_id、严格转化交集、分母 0、窗口边界、`is_final` 边界、比率舍入、商品 distinct、48h TTL、transaction 契约、`ingest_time` 契约、`transaction_id=0` 契约、`is_final` 单调性（`copyWith` + 三条 upsert SQL 文本） | `bash scripts/build_flink_job.sh` | **59 passed / 0 failed** |
 | 集成：ODS | `tests/integration/test_ods_mysql.py` | 真实 MySQL 建表、CSV 装载、幂等重载、脏行保留 | `pytest tests/integration/test_ods_mysql.py` | 7 passed |
 | 集成：DWD | `tests/integration/test_dwd_mysql.py` | 真实 DWD 构建、去重/拒绝分表、账实一致、重复构建幂等 | `pytest tests/integration/test_dwd_mysql.py` | 3 passed |
 | 集成：DWS/ADS | `tests/integration/test_dws_ads_mysql.py` | 既有手工样例全链路、指标口径、`verify_dws_ads` | `pytest tests/integration/test_dws_ads_mysql.py` | 1 passed |
+| 集成：RT upsert 单调性 | `tests/integration/test_rt_upsert_mysql.py` | 从 Java 源码解析真实 upsert 语句，在 `ecommerce_rt_test` 临时库验证已 final 行不被降级（三表）、部分日保持 0、SQL 文本单调性 | `pytest tests/integration/test_rt_upsert_mysql.py` | **5 passed** |
 | 集成：质量 + 增量 | `tests/integration/test_phase5_gate_incremental_mysql.py` | 60 条规则真实执行、publish 拦截、水位增量 | `pytest tests/integration/test_phase5_gate_incremental_mysql.py` | 2 passed |
 | 集成：Airflow 控制面 | `tests/integration/test_phase6_airflow_control_mysql.py` | 任务控制表 / run 记录 / 重试状态 | `pytest tests/integration/test_phase6_airflow_control_mysql.py` | 3 passed |
 | 集成：Kafka 实时链路（9.2） | `tests/integration/test_streaming_kafka.py` | 唯一 selftest topic 全合法往返、非法 JSON 进测试 DLQ、生产 topic/DLQ 不受影响 | `pytest tests/integration/test_streaming_kafka.py` | **2 passed**（Kafka 不可达时按设计 skip） |
@@ -42,13 +43,13 @@
 | **DAG 契约** | `tests/dag/test_airflow_dag_contract.py` | 导入无 DB 副作用、10 任务线性链、重试/超时、调度语义、真实 CLI | 容器内 `pytest tests/dag` | 5 passed |
 | 部署冒烟 | `scripts/check_db_health.py`、`scripts/demo_phase8.py` 第 1/7 步 | MySQL/PostgreSQL/Airflow/Superset `/health`、生产行数基线 | `python scripts/demo_phase8.py` | 通过（见 §5） |
 
-宿主全量结果：**275 passed, 1 skipped**（2026-11-07 Phase 9.4 最新运行日志
+宿主全量结果：**280 passed, 1 skipped**（2026-11-07 Phase 9.4 最新运行日志
 `pytest_full.log`；耗时随机器负载略有波动，以最新日志为准）。构成：Phase 8 既有
 **158 passed** + Phase 9.2 **60 passed**（58 单元 + 2 Kafka 集成；单元里含 9.4 补的
 2 条 `transaction_id=0` 契约回归）+ Phase 9.3 **20 passed**（`test_verify_rt.py`）
 + Phase 9.4 新增 **37 passed**（`test_reconcile_all.py` 18 +
-`test_batch_replay.py` 19）= **275 passed**。
-另有 Phase 9.3/9.4 的 Java 自检 48 项，由 `scripts/build_flink_job.sh` 在构建时执行
+`test_batch_replay.py` 19）+ 5 条 is_final 单调性集成测试 = **280 passed**。
+另有 Phase 9.3/9.4 的 Java 自检 59 项，由 `scripts/build_flink_job.sh` 在构建时执行
 （不计入 pytest）。
 1 skipped 是 `tests/dag` 在宿主缺少 `apache-airflow` 时按设计整模块跳过；同一文件在真实
 Airflow scheduler 容器内 5 passed in 1.30s。

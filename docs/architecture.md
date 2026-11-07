@@ -207,6 +207,6 @@ Windows 11
 - 门禁：run #7 PASS 60/60，89,305,119 行，209.50s；发布作用域守卫正/反例测试覆盖。
 - Airflow：十任务小窗口回填全 success，同区间幂等复跑行数不变；DAG 契约测试容器内 5 passed。
 - Superset：4.1.2，三看板 11/5/5 图，5 项关键指标 ALL MATCH，8 张硬断言截图。
-- 测试：宿主 275 passed / 1 skipped（含 Phase 9.2 新增 60 条、Phase 9.3 新增 20 条对账单测、Phase 9.4 新增 37 条编排/全量对账单测；另有 Java 自检 48 项）；`demo_phase8.py` 8 步通过，生产基线不变。
+- 测试：宿主 280 passed / 1 skipped（含 Phase 9.2 新增 60 条、Phase 9.3 新增 20 条对账单测、Phase 9.4 新增 37 条编排/全量对账单测 + 5 条 is_final 单调性集成测试；另有 Java 自检 59 项）；`demo_phase8.py` 8 步通过，生产基线不变。
 
 详细证据分别见 `docs/ods_design.md`、`docs/dwd_design.md`、`docs/dws_ads_design.md`、`docs/incremental_and_quality.md`、`docs/airflow_design.md`、`docs/superset_design.md`、`docs/performance.md`、`docs/test_matrix.md`。

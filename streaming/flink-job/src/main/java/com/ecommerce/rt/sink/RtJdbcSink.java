@@ -20,10 +20,15 @@ import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
  * {@code RT_MYSQL_PASSWORD} (falling back to the phase-9.2 {@code RT_APP_PASSWORD}); no
  * credential is compiled into the jar. Only the {@code ecommerce_rt} account is used.
  *
- * <p>Every statement is the cumulative-value upsert from docs/streaming_design.md §7.3;
- * {@code source_watermark} only moves forward via {@code GREATEST}. A failed transaction
- * rolls back and rethrows, so Flink restarts from the last checkpoint and the replayed
- * window overwrites the same rows instead of double-counting.
+ * <p>Every statement is the cumulative-value upsert from docs/streaming_design.md §7.3.
+ * Two columns are monotonic and must stay that way: {@code source_watermark} only moves
+ * forward via {@code GREATEST}, and so does {@code is_final}. Writing
+ * {@code is_final = VALUES(is_final)} would let a late, out-of-order write for the same
+ * day downgrade a row that was already final, producing the contradictory state
+ * "watermark past day_end+lateness but is_final=0". {@link DailyResult#copyWith} keeps a
+ * single object monotonic; the SQL must do the same across writes.
+ * A failed transaction rolls back and rethrows, so Flink restarts from the last checkpoint
+ * and the replayed window overwrites the same rows instead of double-counting.
  */
 public class RtJdbcSink extends RichSinkFunction<DailyResult> {
 
@@ -32,7 +37,7 @@ public class RtJdbcSink extends RichSinkFunction<DailyResult> {
     static final String DEFAULT_URL = "jdbc:mysql://mysql:3306/ecommerce_rt";
     static final String DEFAULT_USER = "rt_app";
 
-    static final String TRAFFIC_SQL =
+    public static final String TRAFFIC_SQL =
             "INSERT INTO rt_traffic_daily "
                     + "(event_date_utc, pv, uv, dau, window_start, window_end, "
                     + " source_watermark, is_final, updated_at) "
@@ -42,9 +47,10 @@ public class RtJdbcSink extends RichSinkFunction<DailyResult> {
                     + " window_start = VALUES(window_start), window_end = VALUES(window_end), "
                     + " source_watermark = GREATEST(COALESCE(source_watermark, '1970-01-01'), "
                     + "VALUES(source_watermark)), "
-                    + " is_final = VALUES(is_final), updated_at = VALUES(updated_at)";
+                    + " is_final = GREATEST(is_final, VALUES(is_final)), "
+                    + " updated_at = VALUES(updated_at)";
 
-    static final String FUNNEL_SQL =
+    public static final String FUNNEL_SQL =
             "INSERT INTO rt_funnel_daily "
                     + "(event_date_utc, metric_name, metric_value, window_start, window_end, "
                     + " source_watermark, is_final, updated_at) "
@@ -54,9 +60,10 @@ public class RtJdbcSink extends RichSinkFunction<DailyResult> {
                     + " window_start = VALUES(window_start), window_end = VALUES(window_end), "
                     + " source_watermark = GREATEST(COALESCE(source_watermark, '1970-01-01'), "
                     + "VALUES(source_watermark)), "
-                    + " is_final = VALUES(is_final), updated_at = VALUES(updated_at)";
+                    + " is_final = GREATEST(is_final, VALUES(is_final)), "
+                    + " updated_at = VALUES(updated_at)";
 
-    static final String ITEM_SQL =
+    public static final String ITEM_SQL =
             "INSERT INTO rt_item_behavior_daily "
                     + "(event_date_utc, items_viewed, items_carted, items_bought, "
                     + " window_start, window_end, is_final, updated_at) "
@@ -66,7 +73,8 @@ public class RtJdbcSink extends RichSinkFunction<DailyResult> {
                     + " items_carted = VALUES(items_carted), "
                     + " items_bought = VALUES(items_bought), "
                     + " window_start = VALUES(window_start), window_end = VALUES(window_end), "
-                    + " is_final = VALUES(is_final), updated_at = VALUES(updated_at)";
+                    + " is_final = GREATEST(is_final, VALUES(is_final)), "
+                    + " updated_at = VALUES(updated_at)";
 
     static final String[] FUNNEL_METRICS = {
         "view_users",

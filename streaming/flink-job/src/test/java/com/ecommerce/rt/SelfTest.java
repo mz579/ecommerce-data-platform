@@ -6,6 +6,7 @@ import com.ecommerce.rt.model.DailyResult;
 import com.ecommerce.rt.model.Event;
 import com.ecommerce.rt.parse.EventParser;
 import com.ecommerce.rt.parse.ParseOutcome;
+import com.ecommerce.rt.sink.RtJdbcSink;
 import com.ecommerce.rt.window.DailyAggregator;
 import com.ecommerce.rt.window.WindowUtils;
 import java.math.BigDecimal;
@@ -42,6 +43,7 @@ public final class SelfTest {
         testDedupTtl();
         testTransactionContract();
         testIngestTimeContract();
+        testIsFinalMonotonic();
 
         System.out.printf("%nSELFTEST passed=%d failed=%d%n", passed, failed);
         if (failed > 0) {
@@ -272,6 +274,52 @@ public final class SelfTest {
                                         1,
                                         "2026-11-07T25:00:00.000Z"))
                         .isValid());
+    }
+
+    private static void testIsFinalMonotonic() {
+        // In-memory guard: copyWith must never downgrade an object that is already final.
+        DailyResult result = new DailyResult();
+        result.eventDate = "2015-07-19";
+        result.windowStart = 0L;
+        result.windowEnd = WindowUtils.DAY_MS;
+        result.sourceWatermark = 1000L;
+        result.isFinal = true;
+
+        DailyResult downgraded = result.copyWith(500L, false);
+        check("copyWith keeps is_final=true when finalFlag=false", downgraded.isFinal);
+        check("copyWith keeps the larger watermark", downgraded.sourceWatermark == 1000L);
+
+        DailyResult upgraded = result.copyWith(2000L, true);
+        check("copyWith stays final when finalFlag=true", upgraded.isFinal);
+
+        // Cross-write guard: the upsert SQL must be monotonic for is_final, exactly like
+        // source_watermark. Plain "is_final = VALUES(is_final)" lets an out-of-order write
+        // for the same day downgrade a final row, leaving the contradictory state
+        // "watermark past day_end+lateness but is_final=0" (observed on 2015-07-19 /
+        // 2015-07-25 during the 9.4 demo replays).
+        String[] statements = {
+            RtJdbcSink.TRAFFIC_SQL, RtJdbcSink.FUNNEL_SQL, RtJdbcSink.ITEM_SQL
+        };
+        String[] names = {"traffic", "funnel", "item"};
+        for (int i = 0; i < statements.length; i++) {
+            String sql = statements[i];
+            check(
+                    names[i] + " upsert makes is_final monotonic",
+                    sql.contains("is_final = GREATEST(is_final, VALUES(is_final))"));
+            check(
+                    names[i] + " upsert never assigns is_final from VALUES alone",
+                    !sql.contains("is_final = VALUES(is_final)"));
+        }
+        check(
+                "traffic upsert keeps source_watermark monotonic",
+                RtJdbcSink.TRAFFIC_SQL.contains(
+                        "source_watermark = GREATEST(COALESCE(source_watermark, '1970-01-01'), "
+                                + "VALUES(source_watermark))"));
+        check(
+                "funnel upsert keeps source_watermark monotonic",
+                RtJdbcSink.FUNNEL_SQL.contains(
+                        "source_watermark = GREATEST(COALESCE(source_watermark, '1970-01-01'), "
+                                + "VALUES(source_watermark))"));
     }
 
     private static byte[] json(

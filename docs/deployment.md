@@ -222,7 +222,7 @@ compose 以 `RT_MYSQL_*` 注入）和 `RT_RECON_RO_PASSWORD`（对账只读账�
 
 ```bash
 bash scripts/download_flink_jars.sh     # 下载固定版本 connector / MySQL 驱动到 docker/flink/lib
-bash scripts/build_flink_job.sh         # javac --release 17 + 48 项自检 + build/flink-jobs/ecommerce-rt-job.jar
+bash scripts/build_flink_job.sh         # javac --release 17 + 59 项自检 + build/flink-jobs/ecommerce-rt-job.jar
 wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose build flink-jobmanager flink-taskmanager"
 wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose up -d --force-recreate flink-jobmanager flink-taskmanager"
 bash scripts/deploy_flink_job.sh        # 提交并打印 JOB_ID
@@ -462,7 +462,7 @@ docker compose up -d --force-recreate superset-init && docker compose up -d supe
 - [ ] Airflow `dags list` 可见 `ecommerce_daily_pipeline`；schedule `0 4 * * *`
 - [ ] Superset 4.1.2；3 看板 21 图；`superset_ro` 仅 SELECT
 - [ ] `python scripts/demo_phase8.py` 通过，生产 13 表基线不变
-- [ ] `python -m pytest` 275 passed / 1 skipped；DAG 契约 5 passed
+- [ ] `python -m pytest` 280 passed / 1 skipped；DAG 契约 5 passed
 - [ ] Phase 9.3/9.4：`bash scripts/build_flink_job.sh` 输出 `SELFTEST passed=48 failed=0` 与
       `BUILD_FLINK_JOB_OK`；`bash scripts/deploy_flink_job.sh` 打印 JobID；
       `python scripts/verify_rt_vs_dwd.py <from> <to>` 输出 `VERIFY_RT_VS_DWD_OK`；

@@ -277,7 +277,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| 宿主全量测试 | `python -m pytest` | **275 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
+| 宿主全量测试 | `python -m pytest` | **280 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
 | DAG 契约测试 | `docker compose exec -T airflow-scheduler python -m pytest tests/dag` | **5 passed** |
 | 代码规范 | `ruff check . && ruff format --check .` | 全绿 |
 | 一键端到端演示 | `python scripts/demo_phase8.py` | 8 步通过，约 **4.2s**，生产 13 张表行数不变 |
@@ -288,7 +288,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 | 全新环境 | `docker-compose.fresh.yml` + 独立 env | 独立项目/端口/卷起栈、3 看板 15 数据集、只读 smoke 查询通过 |
 | Phase 9.2 实时回放 | `scripts/replay_to_kafka.py --from 2015-07-14 --rate 5000` | 两轮各 **26,868** 条，0 schema 错误，约 **4,985 msg/s** |
 | Phase 9.2 消费校验/DLQ | `scripts/consume_validate.py --from-beginning` | 第 2 轮 53,736 条全合法、0 非法、distinct `event_id` 26,868；DLQ 演练仅测试 topic |
-| Phase 9.3/9.4 Java 自检 | `bash scripts/build_flink_job.sh` | **48 passed / 0 failed**（9.4 新增 4 项 `ingest_time` + 2 项 `transaction_id=0` 契约），jar 38,099 bytes |
+| Phase 9.3/9.4 Java 自检 | `bash scripts/build_flink_job.sh` | **59 passed / 0 failed**（9.4 新增 4 项 `ingest_time` + 2 项 `transaction_id=0` 契约 + 11 项 `is_final` 单调性），jar 38,106 bytes |
 | Phase 9.3 实时回放 | `scripts/replay_to_kafka.py --from 2015-07-15 --to 2015-07-17 --rate 2000` | **65,940** 条，0 失败，32.98 s，**1,999.2 msg/s** |
 | Phase 9.3 批流对账 | `python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16`（只读 `rt_recon_ro`） | **39/39 MATCH**（3 天 × 13 指标），`VERIFY_RT_VS_DWD_OK` |
 | Phase 9.3 恢复演练 | `flink cancel` → `flink run -d -s <chk-1>` | `restored:1`，续读位点非 0，恢复后对账仍 39/39 MATCH |
@@ -374,7 +374,7 @@ cancel → checkpoint → `flink run -s` 恢复演练 `restored:1` 且续读位�
 
 ```bash
 bash scripts/download_flink_jars.sh          # 下载固定版本 connector 驱动
-bash scripts/build_flink_job.sh              # javac --release 17 + 48 项自检 + 打 jar
+bash scripts/build_flink_job.sh              # javac --release 17 + 59 项自检 + 打 jar
 docker compose build flink-jobmanager flink-taskmanager
 docker compose up -d --force-recreate flink-jobmanager flink-taskmanager
 bash scripts/deploy_flink_job.sh             # 提交作业并打印 JobID

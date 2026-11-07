@@ -471,9 +471,17 @@ ON DUPLICATE KEY UPDATE
   pv = VALUES(pv), uv = VALUES(uv), dau = VALUES(dau),
   window_start = VALUES(window_start), window_end = VALUES(window_end),
   source_watermark = GREATEST(COALESCE(source_watermark, '1970-01-01'), VALUES(source_watermark)),
-  is_final = VALUES(is_final), updated_at = VALUES(updated_at);
+  is_final = GREATEST(is_final, VALUES(is_final)), updated_at = VALUES(updated_at);
 ```
 
+- **`is_final` 与 `source_watermark` 必须一起单调**。两者都用 `GREATEST`，不能用
+  `is_final = VALUES(is_final)`：同一日窗口被多次计算且乱序落库时（例如新作业用
+  `--starting-offsets latest` 回放与已 final 日重叠的日期），后到的 `is_final=0`
+  会把已 final 的行**降级**，而 `source_watermark` 因 GREATEST 仍停在 final 之后，
+  于是出现「watermark 已越过 `D+2 00:00`，但 `is_final=0`」的自相矛盾状态。
+  9.4 演示时实测命中 2015-07-19 / 2015-07-25 两天（见 §11.4.6）。
+  Java 侧 `DailyResult.copyWith` 用 `finalFlag || isFinal` 保证单个对象不降级；
+  数据库侧必须由 SQL 的 `GREATEST` 保证跨写入不降级，两者缺一不可。
 - 防旧覆盖新：同一窗口的结果是**累计值**，后到的重放/迟到修正只会更完整；
   `source_watermark` 记录生成该结果时的水位线，便于审计。若未来出现多作业并发写同一窗口，
   必须加 `result_version` 或仅允许单写者（9.3 默认单作业，串行）。
@@ -484,8 +492,8 @@ ON DUPLICATE KEY UPDATE
   清理前发出最终结果，作业增加按日 key 的 `FinalizeFunction`，在事件时间定时器
   `window_end + 24h` 触发时发出 `is_final=1` 的累计结果（见 §11.3.7 偏差 3）。
 - JDBC sink 采用逐条记录独立事务（autoCommit=false + commit/rollback），失败抛异常触发
-  Flink 重启并从 checkpoint 回放；upsert 主键 + `source_watermark = GREATEST(...)`
-  保证重复写不会回退已发布结果。
+  Flink 重启并从 checkpoint 回放；upsert 主键 + `source_watermark = GREATEST(...)` +
+  `is_final = GREATEST(...)` 保证重复写不会回退已发布结果，也不会把已 final 的行降级。
 
 ### 7.4 与 ADS 离线表的对照
 
@@ -1204,9 +1212,9 @@ gauge 就**冻结并重复最后读数**——第 20 批 58 个采样里只有 3
 | 项 | 结果 |
 | --- | --- |
 | 生产 13 表基线（验收前后各一次） | **13/13 OK**，两次逐行一致（`baseline/production_before.*` / `production_after.*`） |
-| 全量测试 | **275 passed, 1 skipped**（skip 为既有 Airflow DAG 依赖缺失） |
+| 全量测试 | **280 passed, 1 skipped**（skip 为既有 Airflow DAG 依赖缺失） |
 | 9.4 新增测试 | **37 条**（`test_reconcile_all.py` 18 + `test_batch_replay.py` 19）；另有 Java 自检新增 6 项 |
-| Java 自检 | **48 passed / 0 failed**（`SELFTEST_OK`），jar 38,099 bytes |
+| Java 自检 | **59 passed / 0 failed**（`SELFTEST_OK`），jar 38,106 bytes |
 | `ruff check .` | All checks passed |
 | `ruff format --check .` | 126 files already formatted |
 | 写入范围 | 仅 `ecommerce_rt`；`ecommerce_dw` 只读，未新增授权，`rt_recon_ro` 保持只读 |
@@ -1222,6 +1230,39 @@ gauge 就**冻结并重复最后读数**——第 20 批 58 个采样里只有 3
 | 5 | **2015-09-18 非 final**：预期行为（部分日，窗口未到 finalize 时间），对账写 `SKIP`，见 §11.4.2。 |
 | 6 | **对账脚本两条真实路径曾无单测覆盖**：首版 `--write` 在默认元组游标上取 `row["db"]` 崩溃、`--json-out` 因 `date` 不可序列化崩溃。已修复（游标类型无关的守卫 + `isoformat()`），并补 4 条回归单测；随后用真实 `--write --json-out` 跑通，审计表 1,807 行。 |
 | 7 | **端到端延迟受双时钟影响，0 值不是空直方图**：`ingest_time` 由 Windows 宿主机回放器写入，`processing_time` 由 WSL2/Docker TaskManager 取本地时钟，二者未同步；该偏差**非恒定**、随 WSL 与宿主时钟漂移而变——一次长驻探针在 60 s 内测得 -1,066 ~ +596 ms（跨度 1,662 ms，约 1.7 s，`logs/latency_clock_skew.txt`），不同时刻的复测分别为 -350 ~ -228 ms（跨度 122 ms，`logs/latency_clock_skew_midpoint.txt`）和 +966 ~ +1,101 ms（跨度 135 ms），故延迟绝对值只能作趋势参考。`Math.max(0L, ...)` 把负值截断为 0。gauge 在直方图空时返回 `NaN`（244 个采样仅 2 个 NaN），237/239 个采样 gauge 与直方图分位数完全一致，说明 0 是真实 0 值而非空窗默认值。另外回放停止后 gauge 冻结重复最后读数（第 20 批 58 个采样仅 3 个不同组合）。因此延迟报告分三套口径（含 0 / 活跃期 / 回放进行中去重），达标判断以“回放进行中 p95 中位 170 ms、最大观测 671 ms”为准，见 §11.4.3。 |
+
+#### 11.4.6 缺陷修复：`is_final` 被 upsert 降级
+
+**现象**（9.4 演示时发现，非文档问题）：`rt_traffic_daily` 的 2015-07-19、2015-07-25
+两行 `source_watermark` 已越过各自 `D+2 00:00`（分别为 2015-07-21 00:51:49、
+2015-07-27 00:20:42），但 `is_final=0`。`rt_funnel_daily`（7 行/日）与
+`rt_item_behavior_daily` 同样受影响。
+
+**根因**：`RtJdbcSink` 三条 SQL 中 `source_watermark` 用了 `GREATEST`（单调），
+而 `is_final` 是 `is_final = VALUES(is_final)`（直接覆盖）。Java 侧
+`DailyResult.copyWith` 的 `finalFlag || isFinal` 只保护单个对象，保护不到跨写入。
+触发条件：同一日窗口被多次计算且乱序落库——用新作业（`--starting-offsets latest`）
+回放与已 final 日重叠的日期即可复现。
+
+**修复**：三条 SQL 的 `is_final` 统一改为 `GREATEST(is_final, VALUES(is_final))`，
+与 `source_watermark` 一起保证单调（§7.3）。
+
+**验证**：
+
+| 项 | 结果 |
+| --- | --- |
+| Java 自检 | **59 passed / 0 failed**（新增 `testIsFinalMonotonic`：`copyWith` 不降级 + 三条 SQL 文本单调性断言），jar 38,106 bytes |
+| 真库集成测试 | `tests/integration/test_rt_upsert_mysql.py` **5 passed**：在 `ecommerce_rt_test` 临时库里执行从 Java 源码解析出的真实 upsert，验证已 final 行被非 final 写入后仍为 1；临时库用完即删 |
+| 反向验证 | 把 SQL 临时改回 `VALUES(is_final)`，同一集成测试 4 条失败 → 测试确实能抓住该缺陷 |
+| 新旧 SQL 对照 | 同一组写入：旧 SQL 结果 `is_final=0`（降级），新 SQL 结果 `is_final=1`（单调） |
+| 复现场景重跑 | 作业 A 回放 07-19 至 final，作业 B 再回放重叠的 07-18..07-19：`is_final` 保持 1，`RESULT: MONOTONIC_OK` |
+| 数据修复 | 07-19、07-25 按 watermark 恢复为 `is_final=1`（`rt_app`，只改 `is_final`）；**09-18 保持 0**（部分日） |
+| 修复后核对 | 三表非 final 日仅 `2015-09-18`；`rt_traffic_daily` 139 行/138 final、`rt_funnel_daily` 973 行/966 final、`rt_item_behavior_daily` 139 行/138 final；「watermark ≥ D+2 但 is_final=0」矛盾行 **0** |
+| 独立对账 | `INDEPENDENT_CHECK_OK`：0 覆盖缺口、0 重算差异、1,781 MATCH / 26 SKIP、`rt_late_events` 0 行 |
+
+> 注：复现过程用 `--starting-offsets latest` 重放了已 final 的窗口，按设计会产生
+> `beyond_allowed_lateness` 迟到行（26,712 行，均属 07-18/07-19）。这些是复现副作用、
+> 不属于 9.4 验收结果，已在记录后清理，`rt_late_events` 恢复为 0。
 
 ## 12. 风险与后续
 
@@ -1240,6 +1281,7 @@ gauge 就**冻结并重复最后读数**——第 20 批 58 个采样里只有 3
 | 批次大小超过 task heap | 作业 OOM / 反复重启 | 7 天 + 2 前瞻日已实测稳定（state ≤ 41 MB）；扩大批次前先压测，勿盲目调大 `--batch-days` |
 | 最后一批依赖 `withIdleness` | 无后续数据时 finalize 需等约 5 min | 预留等待时间（9.4 实测 287 s）；缩短 idleness 需重新验证误判风险 |
 | `docker compose down -v` | 删除 Kafka/Flink/MySQL 卷 | 生产项目严禁 `-v`；只在 fresh overlay 清理 |
+| `is_final` 被降级 | 已 final 的日被旧写入改回 0，出现「watermark 已过 D+2 但 is_final=0」的矛盾态；下游误判为进行中 | upsert 用 `is_final = GREATEST(is_final, VALUES(is_final))`，与 `source_watermark` 一起单调；Java 自检 + 真库集成测试（`tests/integration/test_rt_upsert_mysql.py`）双重覆盖。见 §7.3、§11.4.6 |
 
 ### 后续阶段交接
 
