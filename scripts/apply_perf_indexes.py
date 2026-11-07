@@ -11,17 +11,21 @@ properties, 2.76M DWD events; MySQL 8.0.43 / WSL2):
 ===========================  ==================  =============
 index                        query               before -> after
 ===========================  ==================  =============
-ods_item_properties property DWS category as-of  62.3s -> 13.2s
-ods_* file_batch             gate batch GROUP BY 21.7s -> 3.9s
-dwd_events_stage build       per-split scan      20.3s -> 0.19s*
+ods_item_properties property DWS category as-of  62.3s -> 16.2s
+ods_* file_batch             gate batch GROUP BY 21.7s -> 4.6s
+dwd_events_stage build       split, 21,623 stage  14.6s -> 0.20s*
 ===========================  ==================  =============
 
 ``*`` the DWD split win also needs the SQL rewrite in ``dwd/builder.py`` (join
 ``dwd_events`` by its UNIQUE ``dedup_key`` instead of materialising DISTINCT).
+The 14.6s -> 0.20s figure is for a new-tail build (21,623 stage rows); on the
+full 2.72M-row stage the split still takes ~19.7s because the ROW_NUMBER()
+window sort dominates, so the join is no longer the bottleneck there.
 
 Rejected candidate: a functional index on
 ``(source_file, CAST(`timestamp` AS UNSIGNED))`` cut a DWD day-scope ODS read
-from 18.8s to 0.08s, but made INSERTs of the legal raw row ``timestamp='oops'``
+from 18.8s to 0.08s in the pre-removal measurement (historical; no longer
+reproducible), but made INSERTs of the legal raw row ``timestamp='oops'``
 fail with MySQL error 3751 ("Data truncated for functional index"). The ODS contract
 keeps dirty rows for DWD rejection, so the index was dropped.
 
