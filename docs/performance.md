@@ -477,7 +477,7 @@ docker compose -p ecommerce-fresh --env-file <fresh.env> \
 
 ## 10. 交付边界
 
-- 未改 README / architecture / 既有设计文档；
+- Phase 8 工程线当时未改 README / architecture / 既有设计文档；V1.0 文档化由后续文档提交完成；
 - 未把 `.env`、临时 env、数据文件、Docker 卷写入仓库；
 - 镜像仍固定 tag（`mysql:8.0.43`、`postgres:16.13`、
   `apache/airflow:2.10.5-python3.11`、`apache/superset:4.1.2`），未使用

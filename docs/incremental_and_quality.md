@@ -294,7 +294,7 @@ python -m ecommerce_dw.cli status                               # 水位 + 近�
 | --- | --- |
 | 紧随其后的第二次 `incremental` | `built=(none) dwd_rows=0 agg_rows=0 watermark_upserted=0 duration=0.00s`（no-op） |
 
-### 9.4 全量质量门禁（最新 run #3，FULL，60 条规则）
+### 9.4 全量质量门禁（Phase 5 阶段最新 run #3，FULL，60 条规则；截至 Phase 5 交付）
 
 | 项 | 值 |
 | --- | --- |
@@ -305,6 +305,8 @@ python -m ecommerce_dw.cli status                               # 水位 + 近�
 | 结果落库 | `quality_check_run` 1 行 + `quality_check_result` 60 行（逐规则 status=PASS） |
 | 新增规则 | `ads_funnel_conv_global_users_eq_dwd`（逐日 `conv_global_users` 独立对 DWD 复算，checked=139 = 每个业务日期一行），与其余 23 条对账规则全数通过 |
 | 本轮是否触发发布 | 否（仅验证加规则后门禁仍 PASS）；`ads_publish_log` 保持 2 行不变 |
+
+> Phase 8 复验为 run #7（60/60，209.50s），见 `docs/performance.md`。
 
 **历史门禁记录**（同生产库，加规则前的 59 条规则版本）：
 
