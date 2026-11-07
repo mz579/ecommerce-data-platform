@@ -2,7 +2,7 @@
 
 **基于 Retailrocket 电商行为数据的四层数据仓库与看板平台（V1.0）**：把约 1 GB 原始 CSV 建设为 MySQL 四层数仓（ODS → DWD → DWS → ADS），由 Airflow 每日编排增量构建与 60 条硬质量门禁，Superset 提供三个只读业务看板。
 
-**阶段状态：Phase 1–8 全部完成，V1.0 已交付；Phase 9.1–9.2 已完成。** Phase 9 为可选的 Kafka + Flink 实时扩展：已完成 Kafka/Flink 基础设施、`event_v1` 消息契约、DWD 回放器、schema 校验/DLQ 消费者，以及 `ecommerce_rt` 5 张结果表与最小权限账号；Flink 实时业务作业尚未实现。
+**阶段状态：Phase 1–8 全部完成，V1.0 已交付；Phase 9.1–9.3 已完成。** Phase 9 为可选的 Kafka + Flink 实时扩展：已完成 Kafka/Flink 基础设施、`event_v1` 消息契约、DWD 回放器、schema 校验/DLQ 消费者、`ecommerce_rt` 5 张结果表与最小权限账号，以及 Flink DataStream 实时作业（`event_id` 去重 → UTC 日窗口 → JDBC upsert）与独立 SQL 对账。实时作业对 2015-07-14~07-16 共 39 个指标全部 MATCH，并通过 cancel/restore 演练。
 
 ---
 
@@ -141,9 +141,9 @@ ecommerce-data-platform/
 │  ├─ incremental/          # 水位线、迟到窗口、回填规划
 │  ├─ quality/              # 60 条规则、硬门禁、发布作用域守卫
 │  ├─ ops/                  # Airflow 控制面（窗口/校验/批次登记）
-│  ├─ streaming/            # Phase 9：event_v1 构造/校验、DWD 回放器、DLQ 消费者、RT DDL/授权
+│  ├─ streaming/            # Phase 9：event_v1 构造/校验、DWD 回放器、DLQ 消费者、RT DDL/授权、批流对账
 │  └─ cli.py                # 统一入口 incremental / quality / publish / verify / status
-├─ streaming/               # Phase 9：event_v1 JSON Schema 与 Flink SQL 预留目录
+├─ streaming/               # Phase 9：event_v1 JSON Schema 与 Flink DataStream 作业源码
 ├─ tests/                   # 单元 / 集成 / E2E / DAG 契约
 ├─ docker-compose.yml       # 生产栈
 ├─ docker-compose.fresh.yml # 全新环境 overlay（独立容器名/卷）
@@ -277,7 +277,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| 宿主全量测试 | `python -m pytest` | **216 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
+| 宿主全量测试 | `python -m pytest` | **233 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
 | DAG 契约测试 | `docker compose exec -T airflow-scheduler python -m pytest tests/dag` | **5 passed** |
 | 代码规范 | `ruff check . && ruff format --check .` | 全绿 |
 | 一键端到端演示 | `python scripts/demo_phase8.py` | 8 步通过，约 **4.2s**，生产 13 张表行数不变 |
@@ -288,12 +288,16 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 | 全新环境 | `docker-compose.fresh.yml` + 独立 env | 独立项目/端口/卷起栈、3 看板 15 数据集、只读 smoke 查询通过 |
 | Phase 9.2 实时回放 | `scripts/replay_to_kafka.py --from 2015-07-14 --rate 5000` | 两轮各 **26,868** 条，0 schema 错误，约 **4,985 msg/s** |
 | Phase 9.2 消费校验/DLQ | `scripts/consume_validate.py --from-beginning` | 第 2 轮 53,736 条全合法、0 非法、distinct `event_id` 26,868；DLQ 演练仅测试 topic |
+| Phase 9.3 Java 自检 | `bash scripts/build_flink_job.sh` | **42 passed / 0 failed**，jar 37,024 bytes |
+| Phase 9.3 实时回放 | `scripts/replay_to_kafka.py --from 2015-07-15 --to 2015-07-17 --rate 2000` | **65,940** 条，0 失败，32.98 s，**1,999.2 msg/s** |
+| Phase 9.3 批流对账 | `python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16` | **39/39 MATCH**（3 天 × 13 指标），`VERIFY_RT_VS_DWD_OK` |
+| Phase 9.3 恢复演练 | `flink cancel` → `flink run -d -s <chk-1>` | `restored:1`，续读位点非 0，恢复后对账仍 39/39 MATCH |
 
 测试矩阵与手算基线见 `docs/test_matrix.md`；性能优化与 EXPLAIN 见 `docs/performance.md`。
 
 ## 9. 已知限制
 
-- **离线批处理仍是主链路，实时仅有基础设施与回放验证**：Phase 9.1/9.2 已落地 Kafka/Flink session 集群、回放器、schema 校验/DLQ 与 `ecommerce_rt` 表结构；尚未实现 Flink 窗口聚合与实时写库，实时结果表当前为空。
+- **离线批处理仍是主链路，实时链路用于回放验证**：Phase 9.1–9.3 已落地 Kafka/Flink session 集群、回放器、schema 校验/DLQ、`ecommerce_rt` 结果表与 Flink 日窗口作业；实时结果对 2015-07-14~07-16 与离线 ADS 同口径 39/39 MATCH，但未接入在线流量，商品排行/留存/告警未实时化。
 - **数据是 2015 年历史快照**：Retailrocket 数据集静态、无持续新增；增量的“新尾巴”在本仓库靠重放/样例模拟，不是真实在线流量。
 - **匿名访客口径**：`visitorid` 是 Cookie 级匿名标识，不是注册用户；Cookie 清理会高估 UV/留存。`visitorid=0` 的 3 行作为未知访客桶，计入 PV、不计入去重用户。
 - **首末日是部分日**：2015-05-03 自 03:00 UTC 起、2015-09-18 至 02:59 UTC 止；ADS 用 `is_full_day=0` 标记，留存末尾 cohort 用 `window_status='partial'`，不得当完整率使用。
@@ -345,4 +349,25 @@ checkpoint 取消保留与恢复演练通过。
 0 schema 错误，重复回放后 distinct `event_id` 保持 26,868；生产 13 表基线验收前后一致。
 详见 `docs/streaming_design.md` §11.2。
 
-**尚未实现**：Flink 日窗口聚合、去重状态、JDBC upsert 与批流对账。V1.0 不依赖本扩展。
+**9.3 实时作业（已完成）**：Flink DataStream 作业 `ecommerce-rt-daily-metrics`
+（`streaming/flink-job/`）：KafkaSource → `event_v1` 解析/校验（非法进 DLQ）→
+`event_id` 去重（48h TTL）→ UTC 日滚动窗口（30s 乱序水位线、24h 允许迟到、迟到旁路）
+→ `rt_traffic_daily` / `rt_funnel_daily` / `rt_item_behavior_daily` JDBC 幂等 upsert。
+2026-11-07 主验收 JobID `c2bc776cd60fab3afd2ca80a5e2c071e`：消费 119,676 条、
+去重 26,868 条、7/14–7/16 共 39 个指标与 `dwd_events` 独立 SQL 对账 **全部 MATCH**；
+cancel → checkpoint → `flink run -s` 恢复演练 `restored:1` 且续读位点正确。详见
+`docs/streaming_design.md` §11.3。
+
+常用命令：
+
+```bash
+bash scripts/download_flink_jars.sh          # 下载固定版本 connector 驱动
+bash scripts/build_flink_job.sh              # javac --release 17 + 42 项自检 + 打 jar
+docker compose build flink-jobmanager flink-taskmanager
+docker compose up -d --force-recreate flink-jobmanager flink-taskmanager
+bash scripts/deploy_flink_job.sh             # 提交作业并打印 JobID
+python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16
+```
+
+**未实现（后续可选）**：商品 Top-N 排行、留存 cohort、监控告警、application 模式/自动恢复、
+实时看板衔接。V1.0 不依赖本扩展。

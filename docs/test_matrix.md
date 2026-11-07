@@ -1,13 +1,14 @@
-# Phase 8–9.2 测试矩阵与指标正确性基线
+# Phase 8–9.3 测试矩阵与指标正确性基线
 
-> 本文覆盖 Phase 8（测试 / 性能 / 交付硬化）与 Phase 9.2（Kafka 回放/校验）的测试矩阵与
-> 手工样例说明。测试只写 `*_test` schema 或一次性独立 schema，**不触碰生产库
+> 本文覆盖 Phase 8（测试 / 性能 / 交付硬化）与 Phase 9.2/9.3（Kafka 回放/校验、Flink 实时作业）
+> 的测试矩阵与手工样例说明。测试只写 `*_test` schema 或一次性独立 schema，**不触碰生产库
 > `ecommerce_dw` 的数据**。所有结果均为本机真实执行输出，不是推算。
 >
 > 交付命令（项目根目录，venv 已激活）：
 >
 > ```bash
-> python -m pytest                 # 宿主：216 passed, 1 skipped in 15.32s
+> python -m pytest                 # 宿主：233 passed, 1 skipped in 15.35s
+> bash scripts/build_flink_job.sh  # Java 自检 42 passed（同时产出作业 jar）
 > docker compose exec -T airflow-scheduler python -m pytest tests/dag   # 5 passed
 > ruff check . && ruff format --check .                                   # 全绿
 > python scripts/demo_phase8.py    # 一键 8 步演示（见 performance.md §8）
@@ -26,6 +27,8 @@
 | 单元：运维 | `tests/unit/test_ops_validate.py`、`test_ops_window.py` | 源文件校验、窗口计算、边界日期 | `pytest tests/unit` | 18 passed |
 | 单元：部署授权 | `tests/unit/test_superset_grants.py` | `MYSQL_RO_USER` 解析、CREATE/ALTER/GRANT 语句生成、dry-run 密码脱敏、字面量转义 | `pytest tests/unit/test_superset_grants.py` | 5 passed |
 | 单元：实时回放/校验（9.2） | `tests/unit/test_streaming_events.py`、`test_streaming_replay.py`、`test_streaming_validate_consumer.py`、`test_rt_ddl_grants.py` | event_v1 消息构造/时间格式/quality_flags/transaction 条件、producer 配置、DLQ 决策与统计、RT DDL 5 表、库名守卫与最小权限 SQL | `pytest tests/unit/test_streaming_events.py tests/unit/test_streaming_replay.py tests/unit/test_streaming_validate_consumer.py tests/unit/test_rt_ddl_grants.py` | **56 passed** |
+| 单元：批流对账（9.3） | `tests/unit/test_verify_rt.py` | 独立 SQL 文本/参数、6 位 HALF_UP 比率、分母 0 为 NULL、13 指标期望值、MATCH/DIFF/缺行判定、日期区间与表格输出、RT 三表合并 | `pytest tests/unit/test_verify_rt.py` | **17 passed** |
+| Java 自检（9.3） | `streaming/flink-job/src/test/java/com/ecommerce/rt/SelfTest.java` | 解析校验、同 `event_id` 去重、null visitor 排除 UV/DAU、orders 用 distinct transaction_id、严格转化交集、分母 0、窗口边界、`is_final` 边界、比率舍入、商品 distinct、48h TTL、transaction 契约 | `bash scripts/build_flink_job.sh` | **42 passed / 0 failed** |
 | 集成：ODS | `tests/integration/test_ods_mysql.py` | 真实 MySQL 建表、CSV 装载、幂等重载、脏行保留 | `pytest tests/integration/test_ods_mysql.py` | 7 passed |
 | 集成：DWD | `tests/integration/test_dwd_mysql.py` | 真实 DWD 构建、去重/拒绝分表、账实一致、重复构建幂等 | `pytest tests/integration/test_dwd_mysql.py` | 3 passed |
 | 集成：DWS/ADS | `tests/integration/test_dws_ads_mysql.py` | 既有手工样例全链路、指标口径、`verify_dws_ads` | `pytest tests/integration/test_dws_ads_mysql.py` | 1 passed |
@@ -36,9 +39,11 @@
 | **DAG 契约** | `tests/dag/test_airflow_dag_contract.py` | 导入无 DB 副作用、10 任务线性链、重试/超时、调度语义、真实 CLI | 容器内 `pytest tests/dag` | 5 passed |
 | 部署冒烟 | `scripts/check_db_health.py`、`scripts/demo_phase8.py` 第 1/7 步 | MySQL/PostgreSQL/Airflow/Superset `/health`、生产行数基线 | `python scripts/demo_phase8.py` | 通过（见 §5） |
 
-宿主全量结果：**216 passed, 1 skipped in 15.32s, exit 0**（2026-11-07 最新运行日志
+宿主全量结果：**233 passed, 1 skipped in 15.35s, exit 0**（2026-11-07 最新运行日志
 `pytest_full.log`；耗时随机器负载略有波动，以最新日志为准）。构成：Phase 8 既有
-**158 passed** + Phase 9.2 新增 **58 passed**（56 单元 + 2 Kafka 集成）= **216 passed**。
+**158 passed** + Phase 9.2 新增 **58 passed**（56 单元 + 2 Kafka 集成）+ Phase 9.3 新增
+**17 passed**（`test_verify_rt.py`）= **233 passed**。另有 Phase 9.3 的 Java 自检 42 项，
+由 `scripts/build_flink_job.sh` 在构建时执行（不计入 pytest）。
 1 skipped 是 `tests/dag` 在宿主缺少 `apache-airflow` 时按设计整模块跳过；同一文件在真实
 Airflow scheduler 容器内 5 passed in 1.30s。
 
@@ -136,3 +141,6 @@ DAG 导入副作用测试不触发任何真实建连；依赖顺序测试只读 
   链路正确性由 DAG 契约测试 + 独立 E2E 测试覆盖。
 - **23M 行全量重载**不作为常规测试；全量性能数字来自生产库按需实测，
   常规 CI 只跑小样例。
+- **Flink 作业**不纳入 pytest：窗口/去重/解析逻辑由 `SelfTest.java` 在构建时执行
+  （42 项），端到端行为由真实回放 + `verify_rt_vs_dwd.py` 验收（§11.3），
+  不在 CI 中启动 Kafka/Flink。

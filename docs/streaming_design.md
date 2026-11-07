@@ -1,9 +1,10 @@
-# Kafka + Flink 实时链路设计（Phase 9.1–9.2 · 基础设施、回放与校验）
+# Kafka + Flink 实时链路设计（Phase 9.1–9.3 · 基础设施、回放、校验与实时作业）
 
-> 状态：**9.1 / 9.2 已完成**（2026-11-07）。9.1 交付 Kafka/Flink 基础设施与消息契约；
-> 9.2 交付 DWD 回放器、schema 校验/DLQ 消费者、`ecommerce_rt` 5 张结果表 DDL 与最小权限账号，
-> 并完成两轮真实回放验收（0 schema 错误，重复可被 `event_id` 吸收）。
-> **Flink 业务窗口聚合与实时结果写入仍未实现**（留给 9.3）。
+> 状态：**9.1 / 9.2 / 9.3 已完成**（2026-11-07）。9.1 交付 Kafka/Flink 基础设施与消息契约；
+> 9.2 交付 DWD 回放器、schema 校验/DLQ 消费者、`ecommerce_rt` 5 张结果表 DDL 与最小权限账号；
+> 9.3 交付 Flink DataStream 业务作业（`event_id` 去重 → UTC 日窗口 → JDBC upsert）、
+> 独立 SQL 对账脚本，并完成真实回放验收、cancel/restore 演练与 DLQ 容错验证
+> （JobID `c2bc776cd60fab3afd2ca80a5e2c071e`，39/39 指标 MATCH，详见 §11.3）。
 >
 > 上游事实基线：生产库 `ecommerce_dw` 的 13 张表行数复核不变（见 §10），
 > ODS 2,756,101 / DWD 2,755,641 / DWS+ADS 9 表 / `ads_publish_log` 12。
@@ -32,13 +33,15 @@
 1. 在现有批处理数仓不动的前提下，增加一条**可回放验证**的实时链路：
    回放器 → Kafka → Flink → 实时结果表 → 对账/监控。
 2. 用同一份 2015 年 Retailrocket 事件，验证实时窗口结果能与离线 ADS 日表**同口径对账**。
-3. 把消息契约、topic、窗口、checkpoint、结果表、监控、资源边界先钉死，9.2/9.3 只填业务实现。
+3. 把消息契约、topic、窗口、checkpoint、结果表、监控、资源边界先钉死，9.2/9.3 分阶段实现（均已完成）。
 
 ### 1.2 非目标（本阶段明确不做）
 
-- 不实现 Flink 业务作业（PV/UV/漏斗窗口、维表关联、JDBC sink）——9.3。
+- ~~不实现 Flink 业务作业（PV/UV/漏斗窗口、维表关联、JDBC sink）——9.3。~~
+  9.3 已实现日窗口、去重与 JDBC sink；维表关联仍未做。
 - ~~不实现回放器业务逻辑~~：9.2 已实现回放器，数据源为 `dwd_events`（见 §11.2 偏差 1）。
-- ~~不建实时结果表~~：9.2 已建 5 张表；本阶段仍**不写任何实时数据**（Flink 作业未实现）。
+- ~~不建实时结果表~~：9.2 已建 5 张表，9.3 已由 Flink 作业写入 3 张指标表；
+  `rt_reconciliation_daily` 仍由对账工具按需使用，作业不写。
 - 不改 ODS/DWD/DWS/ADS 生产表、不改 Airflow DAG、不改 Superset 看板。
 - 不把实时链路接入生产流量；Retailrocket 是静态快照，实时链路是**回放验证**，不是线上流量。
 
@@ -228,6 +231,12 @@ producer 带 sequence number，broker 拒绝重复批次。它**不保证**：
 
 ## 6. Flink 设计
 
+> **9.3 实现状态**：已按本节实现为 Java DataStream 作业
+> `streaming/flink-job/src/main/java/com/ecommerce/rt/`，作业名 `ecommerce-rt-daily-metrics`，
+> 并行度 2，源码与构建脚本见 §11.3.1。实现偏差：connector 版本改为 3.3.0-1.20（偏差 1）、
+> `is_final` 由独立 `FinalizeFunction` 在 `window_end + 24h` 定时发出（偏差 3）。
+> 迟到旁路已接线（`rt_late_events`），本数据集未产生迟到行（偏差 4）。
+
 ### 6.1 时间语义
 
 - **Event time**：`event_time`（2015 年业务时间），不是处理时间。
@@ -256,7 +265,7 @@ producer 带 sequence number，broker 拒绝重复批次。它**不保证**：
 | 交易用户 | `rt_funnel_daily` (`buyer_users`) | TUMBLE 1d | `COUNT(DISTINCT visitor_id)`（`transaction`） | visitor_id | — |
 | 订单数 | `rt_funnel_daily` (`orders`) | TUMBLE 1d | `COUNT(DISTINCT transaction_id)` | transaction_id | 不能用交易事件行数 |
 | 加购率 | `rt_funnel_daily` (`add_to_cart_rate`) | 同日派生 | `cart_users / view_users` | — | 分母 0 → NULL |
-| 严格转化率 | `rt_funnel_daily` (`conv_strict_rate`) | 同日派生 | `conv_strict_users / view_users` | visitor_id | 需“当日既 view 又 transaction”的访客集合；9.3 实现 |
+| 严格转化率 | `rt_funnel_daily` (`conv_strict_rate`) | 同日派生 | `conv_strict_users / view_users` | visitor_id | 需“当日既 view 又 transaction”的访客集合；9.3 已实现 |
 | 全局转化率 | `rt_funnel_daily` (`conv_global_rate`) | 同日派生 | `buyer_users / view_users` | visitor_id | 分子可 > 分母，合法 |
 | 每日去重商品数 | `rt_item_behavior_daily` | TUMBLE 1d | `COUNT(DISTINCT item_id)` 分事件类型 | item_id | 三个列：viewed/carted/bought |
 
@@ -282,7 +291,8 @@ producer 带 sequence number，broker 拒绝重复批次。它**不保证**：
 
 > 10 秒间隔对 2.76M 事件回放偏密，但状态很小（每日去重 visitor 集合）；R24 复测
 > chk-1 端到端 65 ms、state 15,755 bytes（`_metadata` 18,286 bytes），上一轮为 175 ms /
-> 15,431 bytes。9.2 可调到 30–60 秒，减少小文件。
+> 15,431 bytes。9.3 业务作业状态约 26 MB，10 秒间隔实测 checkpoint 约 190 ms，
+> 可接受；若状态继续增长可调到 30–60 秒，减少小文件。
 
 **关于 `RETAIN_ON_FAILURE`**：Flink 1.20.1 的
 `CheckpointConfig.ExternalizedCheckpointCleanup` 只有三个取值：
@@ -317,7 +327,7 @@ docker exec ecommerce-flink-taskmanager bash -lc \
   跨节点无法读取 checkpoint。
 - 命名卷在 `docker compose down`（不带 `-v`）后保留；`down -v` 会删除，等同于丢弃恢复点。
 
-### 6.5 恢复演练（9.1 已实测，9.3 用业务作业复演）
+### 6.5 恢复演练（9.1 已实测，9.3 已用业务作业复演）
 
 R24 已用官方 `StateMachineExample.jar` 完成一次完整演练，命令与结果如下：
 
@@ -348,14 +358,28 @@ R24 已用官方 `StateMachineExample.jar` 完成一次完整演练，命令与�
 6. 注入一条 checkpoint 之后、故障之前的事件，确认重放后被 `event_id` 去重吸收；
 7. 演练通过后按 §6.3 的 janitor 策略清理旧 checkpoint。
 
-> 9.1 的演练证明“cancel 后 checkpoint 仍在 + 可从 checkpoint 恢复”；业务作业的
-> Kafka offset/结果表一致性验证属于 9.3 验收项。
+**9.3 实测（2026-11-07）**：Job1 `f374418827bdb395cc9a1912da125ac5`（独立 group
+`ecommerce-rt-flink-v1-drill`）在回放 7/16–7/17 过程中完成 chk-1..3，记录 chk-1 =
+`file:/opt/flink/checkpoints/f374418827bdb395cc9a1912da125ac5/chk-1`（3 个 state 文件合计
+26,229,381 bytes，`_metadata` 24,794 bytes）；`flink cancel` 后 chk-1..3 目录保留。Job2
+`49724c3286eb95c36b0283d46b34d2aa` 用 `-s chk-1` 恢复，REST 返回 `"restored":1`，
+`external_path` 指向 chk-1；Job2 source 共消费 41,803 条（= 本次回放量）后追平 topic end，
+由此其起始位点等于回放前 end offset `39,832/40,198/39,647`（即 chk-1 位点，记录数 119,676），
+不是 0 也不是 cancel 时的 group offset。完整数据见 §11.3.4。
+
+> 9.1 的演练证明“cancel 后 checkpoint 仍在 + 可从 checkpoint 恢复”；9.3 进一步验证了
+> 业务作业的 Kafka offset 续读与结果表无重复计数（§11.3.4）。
 > 若改用 savepoint：`flink stop <job_id>` 默认写到
 > `state.savepoints.dir`，再用 `flink run -s file:/opt/flink/savepoints/<...>` 恢复；
 > 本阶段未把 savepoint 作为默认恢复点，因为它需要额外一次 stop 操作，且 9.1 的
 > cancel+checkpoint 路径已验证可用。
 
 ## 7. 实时结果表设计（`ecommerce_rt`）
+
+> **9.3 实现状态**：作业按 §7.3 的 upsert 语句写入 `rt_traffic_daily`（1 行/日）、
+> `rt_funnel_daily`（7 行/日）、`rt_item_behavior_daily`（1 行/日），一次窗口结果在同一
+> JDBC 事务内写三表；`rt_late_events` 由迟到旁路写（实测 0 行）。JDBC URL / 账号只从
+> 环境变量读取，未新增任何授权（`rt_app` 仍仅 `ecommerce_rt.*` DML）。
 
 ### 7.1 隔离边界
 
@@ -374,7 +398,9 @@ R24 已用官方 `StateMachineExample.jar` 完成一次完整演练，命令与�
 > 幂等应用（目标库硬性限制为 `ecommerce_rt` 或 `*_test`，禁止 `ecommerce_dw`）。
 > 2026-11-07 在 `ecommerce_rt` 实测 5 张表全部创建，列数分别为
 > `rt_traffic_daily` 9 / `rt_funnel_daily` 8 / `rt_item_behavior_daily` 8 /
-> `rt_reconciliation_daily` 8 / `rt_late_events` 6，表均为空（9.3 写入）。
+> `rt_reconciliation_daily` 8 / `rt_late_events` 6。9.3 已写入 3 张指标表
+> （`rt_traffic_daily` 3 行 / `rt_funnel_daily` 21 行 / `rt_item_behavior_daily` 3 行），
+> `rt_late_events` 实测 0 行，`rt_reconciliation_daily` 作业不写。
 
 ```text
 rt_traffic_daily
@@ -445,18 +471,25 @@ ON DUPLICATE KEY UPDATE
 
 - 防旧覆盖新：同一窗口的结果是**累计值**，后到的重放/迟到修正只会更完整；
   `source_watermark` 记录生成该结果时的水位线，便于审计。若未来出现多作业并发写同一窗口，
-  必须加 `result_version` 或仅允许单写者（9.2 默认单作业，串行）。
+  必须加 `result_version` 或仅允许单写者（9.3 默认单作业，串行）。
 - `is_final=1` 仅在窗口越过 `day_end + allowed_lateness` 且水位线确认后写；此前为 0，
-  下游查询应把 0 当作“进行中/可能修正”。
+  下游查询应把 0 当作“进行中/可能修正”。9.3 的实现：日窗口在
+  `watermark >= window_end` 开始触发（`is_final=0`），窗口清理发生在
+  `maxTimestamp + allowedLateness`，即 `window_end + 24h - 1ms`；为避免窗口函数无法在
+  清理前发出最终结果，作业增加按日 key 的 `FinalizeFunction`，在事件时间定时器
+  `window_end + 24h` 触发时发出 `is_final=1` 的累计结果（见 §11.3.7 偏差 3）。
+- JDBC sink 采用逐条记录独立事务（autoCommit=false + commit/rollback），失败抛异常触发
+  Flink 重启并从 checkpoint 回放；upsert 主键 + `source_watermark = GREATEST(...)`
+  保证重复写不会回退已发布结果。
 
 ### 7.4 与 ADS 离线表的对照
 
 | 实时表 | 离线对照表 | 对齐列 | 差异 |
 | --- | --- | --- | --- |
 | `rt_traffic_daily` | `ads_traffic_daily` | `event_date_utc`, `pv`, `uv`, `dau` | 实时有 `is_final` / `updated_at`；离线有 `is_full_day` / `build_id` |
-| `rt_funnel_daily` | `ads_funnel_daily` | `(event_date_utc, metric_name)`, `metric_value` | 实时先只落可直接窗口化的指标；严格转化 9.3 |
-| `rt_item_behavior_daily` | `ads_item_behavior_daily` | `event_date_utc`, 三个 distinct 商品数 | 实时不写 Top-100 排行（9.3） |
-| — | `ads_item_ranking_daily` | — | 实时排行需要全量排序，9.3 单独设计 |
+| `rt_funnel_daily` | `ads_funnel_daily` | `(event_date_utc, metric_name)`, `metric_value` | 9.3 已落 7 个漏斗指标（含严格转化率与全局转化率） |
+| `rt_item_behavior_daily` | `ads_item_behavior_daily` | `event_date_utc`, 三个 distinct 商品数 | 9.3 只写三个 distinct 商品数，不写 Top-100 排行 |
+| — | `ads_item_ranking_daily` | — | 实时排行需要全量排序，9.3 未实现，留待后续 |
 | — | `ads_retention_cohort` | — | 留存是跨日 cohort，实时化收益低，暂不做 |
 | `rt_reconciliation_daily` | 无 | — | 新增对账审计表 |
 
@@ -616,7 +649,7 @@ docker compose stop flink-taskmanager flink-jobmanager kafka
   log recovery，启动变慢但数据不丢。不要删除该卷；删除等于换集群。
 - **Flink**：JM/TM 会重启，但 **session 集群不会自动重新提交作业**；作业需手工
   `flink run -s <checkpoint>` 恢复。checkpoint/savepoint 在命名卷中保留。
-  若要求自动恢复，9.3 应改 application 模式 + 外部编排（或 Flink HA + 持久化作业）。
+  若要求自动恢复，需改 application 模式 + 外部编排（或 Flink HA + 持久化作业）；9.3 未实现。
 - **内存**：WSL2 当前 7.8 GiB + 4 GiB swap，swap 已用 3.4 GiB。若后续同时跑全量构建，
   建议在 `C:\Users\<user>\.wslconfig` 提高 `memory`（例如 12GB）并 `wsl --shutdown` 重启；
   本阶段**未修改**宿主配置，避免影响现有栈。
@@ -767,7 +800,7 @@ python scripts/consume_validate.py --from-beginning --idle-timeout 20
 | 项 | 结果 |
 | --- | --- |
 | 生产 13 表基线（验收前后各一次） | 13/13 MATCH；两次输出仅 `checked_at` 不同 |
-| 全量测试 | **216 passed, 1 skipped**（skip 为既有 Airflow DAG 依赖缺失，非 9.2 引入） |
+| 全量测试 | **216 passed, 1 skipped**（9.2 验收时点；skip 为既有 Airflow DAG 依赖缺失，非 9.2 引入；9.3 完成后为 233 passed, 1 skipped） |
 | 9.2 新增测试 | 58 条（56 单元 + 2 Kafka 集成） |
 | `ruff check .` / `ruff format --check .` | 全绿（115 files formatted） |
 
@@ -778,10 +811,163 @@ python scripts/consume_validate.py --from-beginning --idle-timeout 20
 | 1 | **回放数据源**：设计 §2 原画 CSV → 回放器；9.2 任务书要求从 `dwd_events` 只读查询、`event_id=dedup_key`。已按任务书实现并更新 §2 图，与离线去重口径完全一致。 |
 | 2 | **`rt_app` 权限**：设计 §7.1 原文 "DML/DDL"；9.2 按任务书只授予 DML，DDL 由管理员脚本执行，权限更严格。 |
 | 3 | **生产 topic 清理**：9.1 冒烟记录（`ecommerce.events.v1` p2 offset 0）在验收前用 `kafka-delete-records` 删除（low watermark 0→1），使从头消费精确等于 DWD 行数；未改 topic 配置，生产 DLQ 未动。 |
-| 4 | **恢复演练顺延**：本阶段没有 Flink 业务作业，业务作业的 checkpoint/Kafka offset 恢复演练改到 9.3（§6.5 已同步）。 |
+| 4 | **恢复演练顺延**：9.2 时点没有 Flink 业务作业，业务作业的 checkpoint/Kafka offset 恢复演练顺延至 9.3；已完成，见 §11.3.4。 |
 | 5 | **消费提交方式**：逐条异步 commit + 结束时同步 commit；非法消息先确认 DLQ 投递成功，再提交源 offset。 |
 | 6 | **遗留风险**：两轮验收共 53,736 条消息（26,868 distinct）保留在 `ecommerce.events.v1`（retention 7 天）。9.3 首跑若从 earliest 消费必须依赖 `event_id` 去重，或从 committed offset / latest 开始；否则 PV 会翻倍。 |
 | 7 | **未压测不限速**：验收固定 5,000 条/秒，未测 `--rate 0` 的峰值吞吐；单 broker RF=1 仍是容量边界。 |
+
+### 11.3 9.3 验收证据（2026-11-07，真实运行日志）
+
+实现位置：
+
+- Flink 作业：`streaming/flink-job/src/main/java/com/ecommerce/rt/`
+  （`RtJob`、`parse/`、`dedup/`、`window/`、`sink/`、`config/`）；
+- 构建/提交：`scripts/download_flink_jars.sh`、`scripts/build_flink_job.sh`、
+  `scripts/deploy_flink_job.sh`；
+- 独立对账：`src/ecommerce_dw/streaming/verify_rt.py` + `scripts/verify_rt_vs_dwd.py`；
+- 测试：`streaming/flink-job/src/test/java/com/ecommerce/rt/SelfTest.java`、
+  `tests/unit/test_verify_rt.py`。
+
+原始证据日志：`C:\Zproject\ZClaude\streaming-9.3\`
+（`build_flink_job.log`、`docker_rebuild_flink.log`、`deploy_main.log`、
+`replay_main_2015-07-15_17.log`、`main_checkpoints.json`、`verify_main.txt`、
+`deploy_drill_job1.log`、`deploy_drill_job2_restore.log`、`drill_*`、
+`verify_drill_after_restore.txt`、`dlq_test_consume.log`、`baseline_before/after.txt`、
+`pytest_full.log`、`ruff_check.log`、`ruff_format_check.log`）。
+
+#### 11.3.1 构建与部署
+
+| 项 | 结果 |
+| --- | --- |
+| Flink | 1.20.1（现有 standalone session，JM + 1 TM / 2 slots） |
+| Java | 宿主 `javac 25.0.1`，`--release 17` 产出 Java 17 字节码 |
+| Kafka connector | `flink-sql-connector-kafka-3.3.0-1.20.jar`（见偏差 1） |
+| MySQL 驱动 | `mysql-connector-j-8.4.0.jar` |
+| 作业 jar | `build/flink-jobs/ecommerce-rt-job.jar`，37,024 bytes，Main-Class `com.ecommerce.rt.RtJob` |
+| Java 自检 | **42 passed / 0 failed**（`SELFTEST_OK`） |
+| 镜像/容器 | Flink 镜像重建成功，JM/TM 重建后 healthy；jar 以只读卷挂载到 `/opt/flink/jobs` |
+
+```bash
+bash scripts/download_flink_jars.sh
+bash scripts/build_flink_job.sh
+docker compose build flink-jobmanager flink-taskmanager
+docker compose up -d --force-recreate flink-jobmanager flink-taskmanager
+bash scripts/deploy_flink_job.sh
+```
+
+作业参数（`JobConfig`）：`--bootstrap`、`--source-topic`、`--dlq-topic`、
+`--group-id`、`--starting-offsets earliest|latest|committed`、`--parallelism`、`--no-sink`；
+默认 source `ecommerce.events.v1`、DLQ `ecommerce.events.v1.dlq`、group
+`ecommerce-rt-flink-v1`、parallelism 2。
+
+#### 11.3.2 主验收：真实回放 2015-07-15 ~ 07-17
+
+前置状态：生产 topic 已有 9.2 两轮回放的 **53,736** 条（26,868 distinct，分区
+end offset `17,564/17,990/18,183`）。清空 `ecommerce_rt` 三张指标表后，作业从
+**earliest** 起消费，随后按 2,000 msg/s 回放 7/15–7/17。
+
+| 项 | 结果 |
+| --- | --- |
+| 作业 | `ecommerce-rt-daily-metrics`，JobID **`c2bc776cd60fab3afd2ca80a5e2c071e`**，状态 RUNNING |
+| 回放 | `scripts/replay_to_kafka.py --from 2015-07-15 --to 2015-07-17 --rate 2000` |
+| 回放量 | queried/sent/acked = **65,940 / 65,940 / 65,940**，failed=0，invalid_schema=0，32.98 s，**1,999.2 msg/s** |
+| Source 读取 | 79,478 + 40,198 = **119,676** 条（= 53,736 + 65,940） |
+| 解析 | valid **119,676**，invalid **0** |
+| 去重 | seen **119,676**，deduped **26,868**（恰好等于 9.2 重复量） |
+| 窗口/最终化/落库 | 窗口阶段产生 3 条日结果（`finalize` 输入 3）；`finalize-window-results` 出 5 条，JDBC sink 入 5 条 |
+| 迟到旁路 | `late_events = 0` |
+| Checkpoint | 回放期间 checkpoint 全部 COMPLETED（REST 快照 13 个时 state 26,247,801 bytes、189 ms；cancel 后仍见 chk-13/14/15 `_metadata`，目录约 76 MB） |
+| 消费组 | `ecommerce-rt-flink-v1` 提交 offset `39,832/40,198/39,647`，lag 0 |
+| 结束状态 | `flink cancel` 后 `flink list` → `No running jobs` |
+
+RT 表终态（`rt_traffic_daily`，恢复演练结束后直接查询；指标与主验收一致，
+`source_watermark` 为演练运行的水位线）：
+
+| event_date | pv | uv | dau | is_final | source_watermark |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 2015-07-14 | 26,007 | 16,265 | 16,306 | 1 | 2015-07-16 01:17:28.589 |
+| 2015-07-15 | 23,361 | 14,890 | 14,932 | 1 | 2015-07-17 23:59:26.181 |
+| 2015-07-16 | 20,776 | 12,966 | 13,005 | 0 | 2015-07-17 23:59:26.181 |
+| 2015-07-17 | — | — | — | — | 无行（水位线未越过 7/18 00:00） |
+
+`rt_funnel_daily` 21 行（3 天 × 7 指标），`rt_item_behavior_daily` 3 行，
+`rt_late_events` 0 行。
+
+#### 11.3.3 独立对账（不共享作业聚合代码）
+
+```bash
+python scripts/verify_rt_vs_dwd.py 2015-07-14 2015-07-16
+```
+
+期望值由 `ecommerce_dw.dwd_events` 单条 CTE SQL 独立算出（§8），实际值从三张 RT 表读取。
+
+| 日期 | pv | uv | dau | cart | buyer | orders | add_cart | strict | global | items_v/c/b | is_final |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 07-14 | 26,007 | 16,265 | 16,306 | 382 | 120 | 163 | 0.023486 | 0.007009 | 0.007378 | 15,867/520/211 | 1 |
+| 07-15 | 23,361 | 14,890 | 14,932 | 343 | 110 | 157 | 0.023036 | 0.006783 | 0.007388 | 14,591/473/197 | 1 |
+| 07-16 | 20,776 | 12,966 | 13,005 | 324 | 113 | 158 | 0.024988 | 0.008175 | 0.008715 | 13,369/447/195 | 0 |
+
+输出 `SUMMARY matched=39 diff=0 total=39` / `VERIFY_RT_VS_DWD_OK`，退出码 0。
+07-17 无行，符合“水位线未越过 7/18 00:00”的预期。
+
+#### 11.3.4 恢复演练（cancel → checkpoint → restore）
+
+为不污染主作业结果，演练使用独立消费组 `ecommerce-rt-flink-v1-drill` 与 7/16–7/17 数据
+（41,803 条，`--rate 500`，83.62 s）。
+
+| 步骤 | 证据 |
+| --- | --- |
+| Job1 提交 | `f374418827bdb395cc9a1912da125ac5`，`--starting-offsets earliest` |
+| 回放中 checkpoint | chk-1..3 均 COMPLETED；chk-1 = `file:/opt/flink/checkpoints/f374418827bdb395cc9a1912da125ac5/chk-1`（3 个 state 文件合计 26,229,381 bytes + `_metadata` 24,794 bytes） |
+| checkpoint 后观察点 | group `41,323/41,685/41,148`；topic end `42,429/42,803/42,327`（回放仍在进行） |
+| `flink cancel` | `Cancelled job f374418827bdb395cc9a1912da125ac5.` |
+| cancel 后文件保留 | `find` 仍列出 chk-1..3 的 `_metadata` 与 state 文件（`RETAIN_ON_CANCELLATION` 生效） |
+| cancel 时位点 | group `42,982/43,228/42,833`；topic end `45,002/45,377/44,880`（checkpoint 后仍在消费） |
+| Job2 恢复 | `flink run -d -s .../chk-1 ...` → **`49724c3286eb95c36b0283d46b34d2aa`** |
+| restored 证据 | `/jobs/<id>/checkpoints` → `"counts":{"restored":1,...}`，`latest.restored.external_path` = 上述 chk-1 |
+| 续读位点 | Job2 source 共消费 **41,803** 条（= 本次回放量）后追平 topic end；因此其起始位点必然等于回放前的 end offset `39,832/40,198/39,647`（分区 2 low watermark=1，记录数 119,676），**不是 0，也不是 cancel 时 group offset** |
+| Job2 运行 | 18 个 COMPLETED checkpoint（另有 1 个部署期瞬时失败，作业保持 RUNNING、无异常栈） |
+| 恢复后对账 | `verify_rt_vs_dwd.py 2015-07-14 2015-07-16` → `matched=39 diff=0`，`VERIFY_RT_VS_DWD_OK` |
+| 收尾 | Job2 cancel；`flink list` → `No running jobs`；chk-1..3 保留 |
+
+> 说明：`_metadata` 为 Flink 二进制格式，未直接解析 offset；续读位点用
+> “topic end − 作业实际消费条数”反推，并与回放前 end offset 精确吻合，作为等价证据。
+
+#### 11.3.5 非法消息容错（测试 topic，不污染生产）
+
+| 项 | 结果 |
+| --- | --- |
+| 测试 topic | `ecommerce.events.selftest.cd4efc6a` / `.dlq`（演练后删除） |
+| 作业 | `590af322206c2b0f8152c9c7644015fe`，`--parallelism 1 --no-sink` |
+| 输入 | 7 条（5 合法 + 1 非法 JSON + 1 `schema_version=2`） |
+| 结果 | source 7 / valid 5 / invalid 2；`numRestarts=0`，作业未失败 |
+| DLQ | 2 条，offset 0/1，headers：`error_reason`（`invalid_json: Unexpected end-of-input...`、`unsupported_schema_version: 2`）、`source_topic`、`partition=0`、`offset=5/6`、`failed_at` |
+| 生产 topic | 演练前后 `53,673/54,455/53,352` 不变；生产 DLQ `0/0/0` 不变 |
+
+#### 11.3.6 生产基线、测试与代码质量
+
+| 项 | 结果 |
+| --- | --- |
+| 生产 13 表基线（验收前后各一次） | **13/13 OK**，两次输出逐行一致 |
+| 全量测试 | **233 passed, 1 skipped in 15.35 s**（skip 为既有 Airflow DAG 依赖缺失） |
+| 9.3 新增测试 | 59 条（Java 自检 42 + 对账单测 17）；9.2 时点全量为 216 |
+| `ruff check .` | All checks passed |
+| `ruff format --check .` | 118 files already formatted |
+
+#### 11.3.7 与设计的偏差与遗留风险
+
+| # | 说明 |
+| ---: | --- |
+| 1 | **Kafka connector 版本**：任务书建议 `flink-sql-connector-kafka:3.2.0-1.20`，该坐标在 Maven Central 不存在；改用同分支最新 `3.3.0-1.20`（`org.apache.flink.kafka.shaded.*` 已内置 Kafka 客户端）。 |
+| 2 | **DLQ 序列化**：Flink 1.20 的 KafkaSink 要求自定义 `KafkaRecordSerializationSchema`；DLQ headers 手工写入，`error_reason` 取解析异常类型 + 消息。 |
+| 3 | **`is_final` 发出位置**：Flink 在 `maxTimestamp + allowedLateness`（= `window_end + 24h − 1ms`）清理窗口，窗口函数无法在清理前发最终值；增加按日 key 的 `FinalizeFunction`，用事件时间定时器在 `window_end + 24h` 发出 `is_final=1` 的累计结果。 |
+| 4 | **迟到旁路**：本数据集回放有序，`late_events=0`，旁路链路仅由单测与代码路径覆盖，未产生真实迟到行；`rt_late_events` 接受度 0 已验证（表空）。 |
+| 5 | **checkpoint 体积**：稳定态 **26,247,801 bytes**（约 25 MB），主要来自 48h `event_id` 去重状态 + 3 个日窗口集合；单作业 checkpoint 目录在 cancel 后约 76 MB（保留 chk-13..15）。按 §6.3 janitor 清理。 |
+| 6 | **水位线边界**：7/16 行存在但 `is_final=0`，7/17 无行，原因是回放止于 7/17，水位线最高到 7/17 23:59:26，未越过 7/18 00:00；这是设计预期而非缺陷。 |
+| 7 | **sink 事务粒度**：逐条记录一事务（非批量），吞吐足够本数据集但生产需改批量/连接池；sink 非两阶段提交，端到端语义仍为 at-least-once + 幂等 upsert（§5）。 |
+| 8 | **session 集群**：作业不随 JM 重启自动恢复，仍需手工 `flink run -s`（§6.5、§12）。 |
+| 9 | **校验范围**：Java 解析器校验 `schema_version`、必填字段/类型、UTC 时间、事件枚举、visitor/item/transaction 约束与 `event_id` 格式，不加载完整 `event_v1` JSON Schema；完整 schema 校验仍由 9.2 的 Python 消费者承担。 |
+| 10 | **KafkaSource 提示**：启动日志提示 `commit.offsets.on.checkpoint` 由 Flink 管理、未透传给 consumer；实测 checkpoint 后 group offset 正常推进并最终 lag=0，无功能影响。 |
 
 ## 12. 风险与后续
 
@@ -789,21 +975,23 @@ python scripts/consume_validate.py --from-beginning --idle-timeout 20
 | --- | --- | --- |
 | WSL2 内存/swap 压力 | 构建或实时作业被 OOM kill；VM 重启 | 分阶段启停；不在全量构建时跑 Flink；必要时提高 `.wslconfig` 内存 |
 | 单 broker RF=1 | broker 故障即不可用/丢数据 | 本地回放可接受；生产必须 3 broker + RF=3 |
-| session 集群不自动恢复作业 | WSL/容器重启后实时链路停摆 | 9.3 改 application 模式或外部 resubmit；checkpoint 保留 |
+| session 集群不自动恢复作业 | WSL/容器重启后实时链路停摆 | 9.3 已验证 `flink run -s <checkpoint>` 手工恢复；自动恢复需 application 模式或外部 resubmit（未实现） |
 | checkpoint 在本地卷 | 宿主盘故障即丢失恢复点 | 生产换 HDFS/S3；本地至少保留命名卷，避免 `down -v` |
 | retained checkpoint 累积 | cancel/失败后外置 checkpoint 不自动清理，长期占盘 | 按 §6.3 janitor 保留最近 2 个作业目录；监控 `du -sh /opt/flink/checkpoints` |
 | `event_id` 不稳定 | 回放重复计数，对账失败 | 回放器固定用 DWD `dedup_key` 算法；单测覆盖 |
 | 热点 key | 单分区积压 | 监控分区 lag；极端 key 盐化（仅非保序指标） |
 | schema 演进 | 消费端解析失败 | 未知主版本进 DLQ；不原地改 v1；v2 新 topic |
-| 严格转化/排行/留存未实时化 | 指标覆盖不全 | 9.3 按优先级补；9.1/9.2 先保证流量与漏斗基础指标 |
+| 严格转化/排行/留存未实时化 | 指标覆盖不全 | 严格转化与 7 个漏斗指标 9.3 已实时化；商品排行、留存、监控告警仍未做 |
 | 事件时间 2015 与处理时间混淆 | 延迟指标失真 | 明确 `event_time` 只做窗口、`ingest_time` 只做延迟（§3.2） |
 | `docker compose down -v` | 删除 Kafka/Flink/MySQL 卷 | 生产项目严禁 `-v`；只在 fresh overlay 清理 |
 
 ### 后续阶段交接
 
-- **9.2**：回放器（CSV → `event_id` → Kafka，节流/断点）、Flink 作业（去重 → 日窗口 →
-  JDBC upsert）、`ecommerce_rt` DDL 与 `rt_app` 最小权限、对账脚本、恢复演练。
-- **9.3**：严格转化率、商品排行、留存、迟到旁路、监控告警、application 模式/自动恢复、
-  与 Airflow/Superset 的展示衔接（只读 `ecommerce_rt`，不改现有看板）。
-- 阶段收尾再统一更新 `README.md`、`docs/architecture.md`、`docs/deployment.md`；
-  本阶段按约束**未改**这三份文档。
+- **9.1**：Kafka/Flink 基础设施、`event_v1` 契约、checkpoint 配置 —— 已完成。
+- **9.2**：回放器（`dwd_events` → `event_id` → Kafka）、schema 校验/DLQ、`ecommerce_rt` DDL 与
+  `rt_app` 最小权限、恢复演练骨架 —— 已完成。
+- **9.3**：Flink 去重 → UTC 日窗口 → JDBC upsert、7 个漏斗指标（含严格转化率）、
+  迟到旁路、独立 SQL 对账、cancel/restore 演练、DLQ 容错 —— 已完成（§11.3）。
+- **未实现**（后续可选）：商品 Top-N 排行、留存 cohort、监控告警、
+  application 模式/自动恢复、与 Airflow/Superset 的实时看板衔接
+  （只读 `ecommerce_rt`，不改现有看板）。

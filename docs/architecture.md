@@ -17,7 +17,8 @@
 | Phase 7 | Superset 4.1.2 三看板 21 图，独立元库 + `superset_ro` 只读 |
 | Phase 8 | 性能索引与 SQL 重写、测试矩阵、一键演示、fresh 环境部署硬化 |
 
-**下一阶段为 Phase 9：Kafka + Flink 实时扩展（可选）**。当前未实现实时链路。
+**Phase 9（Kafka + Flink 实时扩展，可选）已完成 9.1–9.3**：Kafka 回放 → Flink 去重/日窗口 →
+`ecommerce_rt` 幂等 upsert，与离线 ADS 同口径对账 39/39 MATCH；未接入在线流量。
 
 ## 2. 组件与端口
 
@@ -194,7 +195,7 @@ Windows 11
 | Phase 6 | ✅ | Airflow 编排 |
 | Phase 7 | ✅ | Superset 看板 |
 | Phase 8 | ✅ | 测试、性能与 V1.0 交付 |
-| **Phase 9** | **下一阶段（可选）** | **Kafka + Flink 实时扩展** |
+| **Phase 9** | ✅ | **Kafka + Flink 实时扩展**（9.1 基础设施 / 9.2 回放校验 / 9.3 实时作业与对账） |
 | Phase 10 | 可选 | Spark 批处理扩展 |
 
 ## 10. 验证状态（摘要）
@@ -205,6 +206,6 @@ Windows 11
 - 门禁：run #7 PASS 60/60，89,305,119 行，209.50s；发布作用域守卫正/反例测试覆盖。
 - Airflow：十任务小窗口回填全 success，同区间幂等复跑行数不变；DAG 契约测试容器内 5 passed。
 - Superset：4.1.2，三看板 11/5/5 图，5 项关键指标 ALL MATCH，8 张硬断言截图。
-- 测试：宿主 216 passed / 1 skipped（含 Phase 9.2 新增 58 条）；`demo_phase8.py` 8 步通过，生产基线不变。
+- 测试：宿主 233 passed / 1 skipped（含 Phase 9.2 新增 58 条、Phase 9.3 新增 17 条对账单测；另有 Java 自检 42 项）；`demo_phase8.py` 8 步通过，生产基线不变。
 
 详细证据分别见 `docs/ods_design.md`、`docs/dwd_design.md`、`docs/dws_ads_design.md`、`docs/incremental_and_quality.md`、`docs/airflow_design.md`、`docs/superset_design.md`、`docs/performance.md`、`docs/test_matrix.md`。
