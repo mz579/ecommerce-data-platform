@@ -1,0 +1,2 @@
+Placeholder so the directory exists in a fresh clone.
+Run `bash scripts/download_flink_jars.sh` to fetch the pinned jars; *.jar is git-ignored.

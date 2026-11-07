@@ -31,6 +31,10 @@ logs/
 docker/volumes/
 *.volume/
 
+# ---------- Flink 依赖 jar（scripts/download_flink_jars.sh 下载，不提交） ----------
+docker/flink/lib/*.jar
+docker/flink/lib/*.jar.tmp
+
 # ---------- IDE / 系统 ----------
 .idea/
 .vscode/

@@ -17,4 +17,8 @@ USER root
 RUN mkdir -p /opt/flink/checkpoints /opt/flink/savepoints \
     && chown -R flink:flink /opt/flink/checkpoints /opt/flink/savepoints
 
+# Phase 9.3：Kafka connector 与 MySQL JDBC 驱动（版本锁定，由
+# scripts/download_flink_jars.sh 下载；jar 本身不提交仓库）。
+COPY docker/flink/lib/*.jar /opt/flink/lib/
+
 USER flink

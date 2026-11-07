@@ -141,9 +141,16 @@ x-flink-common: &flink-common
       # 保留的 checkpoint 不受 num-retained 自动清理，清理策略见设计文档 §6.3。
       execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
     TZ: UTC
+    # Phase 9.3：Flink 业务作业写入 ecommerce_rt 的 JDBC 连接参数。
+    # 密码只从 .env 插值（RT_MYSQL_PASSWORD 优先，回退 RT_APP_PASSWORD），不进镜像/仓库。
+    RT_MYSQL_URL: ${RT_MYSQL_URL:-jdbc:mysql://mysql:3306/ecommerce_rt}
+    RT_MYSQL_USER: ${RT_MYSQL_USER:-rt_app}
+    RT_MYSQL_PASSWORD: ${RT_MYSQL_PASSWORD:-${RT_APP_PASSWORD}}
   volumes:
     - flink_checkpoints:/opt/flink/checkpoints
     - flink_savepoints:/opt/flink/savepoints
+    # 宿主机构建好的作业 jar（scripts/build_flink_job.sh），只读挂载给 JM/TM。
+    - ./build/flink-jobs:/opt/flink/jobs:ro
   networks:
     - ecommerce-net
 
