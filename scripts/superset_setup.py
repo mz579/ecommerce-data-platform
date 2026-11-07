@@ -1125,13 +1125,19 @@ def _upsert_datasets(
         if table_name in existing:
             ds_id = existing[table_name]
             # PUT 不接受 database 外键（POST 必须带）
-            payload = {"schema": "ecommerce_dw", "table_name": table_name, "sql": sql}
+            # MySQL "schema" == database name; must follow MYSQL_DATABASE so the
+            # same script bootstraps an isolated fresh stack (Phase 8).
+            payload = {
+                "schema": env("MYSQL_DATABASE", "ecommerce_dw"),
+                "table_name": table_name,
+                "sql": sql,
+            }
             client.request("PUT", f"/api/v1/dataset/{ds_id}", payload=payload)
             print(f"  [dataset] updated #{ds_id} {table_name}")
         else:
             payload = {
                 "database": db_id,
-                "schema": "ecommerce_dw",
+                "schema": env("MYSQL_DATABASE", "ecommerce_dw"),
                 "table_name": table_name,
                 "sql": sql,
             }

@@ -37,10 +37,11 @@ COPY sql ./sql
 RUN chown -R airflow:root /opt/ecommerce_dw \
     && chown -R airflow:root /usr/local/lib/python3.11/site-packages
 
-# editable 安装本项目（pytest 之外的运行时依赖 pyyaml/pymysql/psycopg/python-dotenv
-# 一并落位）：DAG 以 `python -m ecommerce_dw.*` 调用真实 CLI。
+# editable 安装本项目（运行时依赖 pyyaml/pymysql/psycopg/python-dotenv 一并落位）；
+# Phase 8 起带 [dev] 额外装 pytest，使 DAG 契约测试可在真实调度容器内运行：
+#   docker compose exec -T airflow-scheduler python -m pytest tests/dag -q
 USER airflow
-RUN pip install --no-cache-dir -e /opt/ecommerce_dw
+RUN pip install --no-cache-dir -e "/opt/ecommerce_dw[dev]"
 
 USER airflow
 # 保持官方镜像默认 entrypoint（/entrypoint）与 CMD（version）

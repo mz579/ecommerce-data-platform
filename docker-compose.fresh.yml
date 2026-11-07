@@ -1,0 +1,47 @@
+# ============================================================================
+# Phase 8 — isolated "fresh environment" overlay for deployment validation.
+#
+# It reuses docker-compose.yml unchanged and only renames containers + named
+# volumes, so the production stack (`ecommerce-data-platform` project, default
+# ports 3306/5432/8080/8088) is never touched. Ports / database names / users /
+# passwords all come from an external --env-file (kept outside the repo).
+#
+# Usage (from WSL, repo root):
+#   docker compose -p ecommerce-fresh \
+#     --env-file /mnt/c/Zproject/ZClaude/ecommerce-phase8/fresh.env \
+#     -f docker-compose.yml -f docker-compose.fresh.yml up -d mysql postgres
+#   ... wait healthy, apply DDL/small sample/grants, then:
+#   docker compose -p ecommerce-fresh \
+#     --env-file /mnt/c/Zproject/ZClaude/ecommerce-phase8/fresh.env \
+#     -f docker-compose.yml -f docker-compose.fresh.yml up -d
+#   ... verify, then tear down with `down -v`.
+#
+# The overlay intentionally does NOT contain credentials.
+# ============================================================================
+name: ecommerce-fresh
+
+services:
+  mysql:
+    container_name: ecommerce-fresh-mysql
+  postgres:
+    container_name: ecommerce-fresh-postgres
+  airflow-init:
+    container_name: ecommerce-fresh-airflow-init
+  airflow-scheduler:
+    container_name: ecommerce-fresh-airflow-scheduler
+  airflow-webserver:
+    container_name: ecommerce-fresh-airflow-webserver
+  superset-init:
+    container_name: ecommerce-fresh-superset-init
+  superset:
+    container_name: ecommerce-fresh-superset
+
+volumes:
+  mysql_data:
+    name: ecommerce-fresh-mysql-data
+  postgres_data:
+    name: ecommerce-fresh-postgres-data
+  airflow_logs:
+    name: ecommerce-fresh-airflow-logs
+  superset_home:
+    name: ecommerce-fresh-superset-home

@@ -60,6 +60,8 @@ x-airflow-common: &airflow-common
     - ./data:/opt/ecommerce_dw/data:ro
     - ./logs:/opt/ecommerce_dw/logs
     - ./.env:/opt/ecommerce_dw/.env:ro
+    # Phase 8: DAG contract tests run inside the real scheduler runtime
+    - ./tests:/opt/ecommerce_dw/tests:ro
     - airflow_logs:/opt/airflow/logs
   networks:
     - ecommerce-net
@@ -166,6 +168,15 @@ services:
     <<: *airflow-common
     container_name: ecommerce-airflow-scheduler
     command: ["scheduler"]
+    # Phase 8 hardening: never start scheduling before the one-shot init has
+    # finished migrating the metadata DB and before the business MySQL is healthy.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $$(cat /etc/hostname)"]
       interval: 15s
@@ -177,6 +188,14 @@ services:
     <<: *airflow-common
     container_name: ecommerce-airflow-webserver
     command: ["webserver"]
+    # Same ordering contract as the scheduler (init complete + MySQL healthy).
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
     ports:
       - "${AIRFLOW_UI_PORT:-8080}:8080"
     # 基础镜像不保证有 curl/wget，用 python urllib 探测 /health
