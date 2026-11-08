@@ -1,0 +1,5 @@
+# Web UI 后端运行时依赖（锁版本；Python 3.11）
+fastapi==0.115.6
+uvicorn==0.34.0
+PyMySQL==1.2.3
+python-dotenv==1.2.4

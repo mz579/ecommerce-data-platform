@@ -35,7 +35,7 @@ pythonpath = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["src", "scripts", "tests"]
+src = ["src", "scripts", "tests", "web/backend"]
 # notebooks/ 由 scripts/build_eda_notebook.py 生成、nbconvert 执行产出，
 # 内部展示型长行与 format 规则冲突，整目录豁免 lint 与 format。
 extend-exclude = ["notebooks"]

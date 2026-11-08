@@ -23,6 +23,11 @@ data/sample/*
 !data/staging/.gitkeep
 !data/sample/.gitkeep
 
+# ---------- Node / 前端 ----------
+node_modules/
+*.tsbuildinfo
+web/frontend/dist/
+
 # ---------- 日志 ----------
 logs/
 *.log

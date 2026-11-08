@@ -34,3 +34,10 @@ docker/mysql/
 docker/postgres/
 docker/volumes/
 *.volume/
+
+# Web UI：依赖目录不进构建上下文（体积大且可由 npm ci 还原）。
+web/frontend/node_modules/
+# 允许复用宿主机预构建产物（SPEC §6 的退化路径）；全新检出没有 dist 时
+# Dockerfile 的 node 阶段会自动 npm ci && npm run build。
+!web/frontend/dist/
+!web/frontend/dist/**
