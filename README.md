@@ -273,6 +273,23 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 - 8 张真实渲染截图在 `dashboards/screenshots/`，截图脚本带硬断言（任何 `Waiting on` / `No results` → exit 1）。
 - 刷新链路：`publish` 追加 `ads_publish_log` → `v_ads_publish_status` 计数 +1 → 商品分析看板“累计发布次数” KPI +1。
 
+### 7.4 Web UI（Phase 11，只读）
+
+面向 ADS 报表 / 实时结果 / 质量与运维的一体化只读界面：FastAPI 提供 `/api/*`，
+同一容器托管 React SPA；业务连接固定使用只读账号 `webapp_ro`（仅 SELECT）。
+
+```bash
+# 1) 幂等创建/同步只读账号（读 .env 的 WEB_DB_USER / WEB_DB_PASSWORD）
+python scripts/create_webapp_ro.py
+
+# 2) 构建并启动（仅新增 web 容器，不影响现有服务）
+wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-data-platform && docker compose up -d web"
+```
+
+访问 **http://localhost:8090**（端口由 `.env` 的 `WEB_UI_PORT` 控制）。
+宿主机直接调试：`cd web/backend && ../../.venv/Scripts/python.exe -m uvicorn app.main:app --port 8090`。
+架构、接口契约、权限模型与排障见 `docs/webapp_design.md`。
+
 ## 8. 测试与质量证据
 
 | 项 | 命令 | 结果 |
@@ -337,6 +354,7 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 | `docs/incremental_and_quality.md` | 水位线模型、增量规划、60 条规则目录、发布门控、崩溃恢复 |
 | `docs/airflow_design.md` | DAG 结构、调度参数、凭据、回填/排查手册、实测 |
 | `docs/superset_design.md` | 部署拓扑、只读权限、元库隔离、看板/筛选器、验收证据 |
+| `docs/webapp_design.md` | Web UI 架构、API 契约、webapp_ro 权限模型、部署与排障 |
 | `docs/performance.md` | Phase 8 性能优化、EXPLAIN、索引决策、全新环境验证 |
 | `docs/test_matrix.md` | 测试矩阵、手算样例、DAG 契约测试、已知边界 |
 

@@ -198,6 +198,7 @@ Windows 11
 | Phase 8 | ✅ | 测试、性能与 V1.0 交付 |
 | **Phase 9** | ✅ | **Kafka + Flink 实时扩展**（9.1 基础设施 / 9.2 回放校验 / 9.3 实时作业 / 9.4 全量对账与容量验收） |
 | Phase 10 | 可选 | Spark 批处理扩展 |
+| Phase 11 | 已完成 | 只读 Web UI（FastAPI + React + Superset 之外的统一前端） |
 
 ## 10. 验证状态（摘要）
 

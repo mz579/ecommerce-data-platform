@@ -371,6 +371,54 @@ services:
       retries: 12
       start_period: 20s
 
+  # ==================================================================
+  # Phase 11：Web UI（只读展示层）
+  #
+  # - 单容器同时提供 /api/* 与前端 SPA（FastAPI 托管 dist）；
+  # - 业务连接固定为只读账号 webapp_ro（scripts/create_webapp_ro.py 初始化）；
+  # - 不依赖/不修改现有 6 个服务，仅等待 mysql healthy；
+  # - 宿主端口 ${WEB_UI_PORT:-8090}，容器内固定 8090。
+  # ==================================================================
+  web:
+    image: ecommerce-web:1.0.0
+    build:
+      context: .
+      dockerfile: docker/web/Dockerfile
+      args:
+        # auto=容器内构建（失败回退预构建 dist）；prebuilt=直接用 dist；
+        # build=强制构建；skip=占位页（仅验证后端）
+        WEB_FRONTEND_MODE: ${WEB_FRONTEND_MODE:-auto}
+    container_name: ecommerce-web
+    restart: unless-stopped
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      RT_DATABASE: ${RT_DATABASE:-ecommerce_rt}
+      # 只读账号（绝不复用 ecom_app / MYSQL_PASSWORD）
+      WEB_DB_USER: ${WEB_DB_USER:-webapp_ro}
+      WEB_DB_PASSWORD: ${WEB_DB_PASSWORD}
+      WEB_STATIC_DIR: /app/static
+      WEB_LOG_LEVEL: ${WEB_LOG_LEVEL:-INFO}
+      TZ: UTC
+    ports:
+      - "${WEB_UI_PORT:-8090}:8090"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8090/api/health',timeout=5)\"",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+    networks:
+      - ecommerce-net
+
 volumes:
   mysql_data:
   postgres_data:
