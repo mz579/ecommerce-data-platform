@@ -11,7 +11,7 @@ import { ErrorState } from '../components/ErrorState'
 import { KpiCard } from '../components/KpiCard'
 import { ChartSkeleton, KpiSkeleton } from '../components/Skeleton'
 import { useDateRange } from '../state/DateRangeContext'
-import { fontFamily, getChartTheme } from '../theme/tokens'
+import { fontFamily, getChartTheme, rateLineColors } from '../theme/tokens'
 import { useThemeMode } from '../theme/ThemeContext'
 import {
   formatCompact,
@@ -33,7 +33,7 @@ function tooltipBase(theme: ReturnType<typeof getChartTheme>) {
     borderWidth: 1,
     padding: [8, 10],
     textStyle: { color: theme.textPrimary, fontSize: 12, fontFamily },
-    extraCssText: 'border-radius:8px;box-shadow:none;',
+    extraCssText: 'border-radius:0;box-shadow:none;',
   }
 }
 
@@ -109,7 +109,7 @@ export default function OverviewPage() {
           data: data.traffic.map((point) => point.pv),
           showSymbol: false,
           symbol: 'none',
-          lineStyle: { width: 2 },
+          lineStyle: { width: 2.4 },
           emphasis: { focus: 'series' },
         },
         {
@@ -118,7 +118,7 @@ export default function OverviewPage() {
           data: data.traffic.map((point) => point.uv),
           showSymbol: false,
           symbol: 'none',
-          lineStyle: { width: 2 },
+          lineStyle: { width: 2.4 },
           emphasis: { focus: 'series' },
         },
         {
@@ -127,7 +127,7 @@ export default function OverviewPage() {
           data: data.traffic.map((point) => point.dau),
           showSymbol: false,
           symbol: 'none',
-          lineStyle: { width: 2 },
+          lineStyle: { width: 2.4 },
           emphasis: { focus: 'series' },
         },
       ],
@@ -138,7 +138,8 @@ export default function OverviewPage() {
     if (!data) return {}
     const dates = data.rates.map((point) => point.date)
     return {
-      color: theme.categorical.slice(0, 3),
+      // 加购率沿用主题绯红；严格 / 全局转化率用蓝绿，便于在墨黑底上区分。
+      color: [theme.categorical[0], ...rateLineColors[theme.mode]],
       animationDuration: 320,
       textStyle: { fontFamily },
       tooltip: {
@@ -184,7 +185,7 @@ export default function OverviewPage() {
           data: data.rates.map((point) => point.add_to_cart_rate),
           showSymbol: false,
           symbol: 'none',
-          lineStyle: { width: 2 },
+          lineStyle: { width: 2.4 },
           emphasis: { focus: 'series' },
         },
         {
@@ -193,7 +194,7 @@ export default function OverviewPage() {
           data: data.rates.map((point) => point.conv_strict_rate),
           showSymbol: false,
           symbol: 'none',
-          lineStyle: { width: 2 },
+          lineStyle: { width: 2.4 },
           emphasis: { focus: 'series' },
         },
         {
@@ -202,7 +203,7 @@ export default function OverviewPage() {
           data: data.rates.map((point) => point.conv_global_rate),
           showSymbol: false,
           symbol: 'none',
-          lineStyle: { width: 2 },
+          lineStyle: { width: 2.4 },
           emphasis: { focus: 'series' },
         },
       ],
@@ -253,6 +254,7 @@ export default function OverviewPage() {
             name: STAGE_LABELS[stage.stage] ?? stage.stage,
             value: stage.users,
             itemStyle: { color: theme.categorical[index % theme.categorical.length] },
+            label: { color: index === 0 ? '#f4f1eb' : '#08080a' },
           })),
         },
       ],
@@ -323,6 +325,15 @@ export default function OverviewPage() {
 
   return (
     <div className="page-stack">
+      <section className="analysis-callout">
+        <p className="eyebrow">DATA SOURCE</p>
+        <p>
+          <strong>本页不是内置演示数据。</strong>{' '}
+          数字来自 Retailrocket 事件数据集经 ODS → DWD → DWS → ADS 四层数仓后的日聚合：
+          2015-05-03 ~ 2015-09-18，共 139 天、2,756,101 条原始事件。点顶栏「来源」可查看数据集、许可证、校验与商品编号说明。
+        </p>
+      </section>
+
       <div className="kpi-grid">
         <KpiCard label="PV · 页面浏览量" value={formatInt(kpis.pv)} hint="区间内浏览事件行数" />
         <KpiCard

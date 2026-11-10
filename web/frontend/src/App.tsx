@@ -1,4 +1,5 @@
 import { BrowserRouter } from 'react-router-dom'
+import { MagpiePet } from './components/MagpiePet'
 import { Sidebar } from './components/Sidebar'
 import { TopBar } from './components/TopBar'
 import { DateRangeProvider } from './state/DateRangeContext'
@@ -21,6 +22,7 @@ export default function App() {
                 </main>
               </div>
             </div>
+            <MagpiePet />
           </DateRangeProvider>
         </BrowserRouter>
       </RefreshProvider>

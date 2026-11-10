@@ -26,7 +26,7 @@ function tooltipBase(theme: ReturnType<typeof getChartTheme>) {
     borderWidth: 1,
     padding: [8, 10],
     textStyle: { color: theme.textPrimary, fontSize: 12, fontFamily },
-    extraCssText: 'border-radius:8px;box-shadow:none;',
+    extraCssText: 'border-radius:0;box-shadow:none;',
   }
 }
 
@@ -116,7 +116,7 @@ export default function ItemsPage() {
           name: metric === 'transaction_cnt' ? '成交件数' : '曝光次数',
           type: 'bar',
           barCategoryGap: '52%',
-          itemStyle: { color: theme.categorical[0], borderRadius: [0, 4, 4, 0] },
+          itemStyle: { color: theme.categorical[0] },
           label: { show: false },
           data: chartRows.map((row, index) => ({
             value: row[metric],
@@ -182,7 +182,7 @@ export default function ItemsPage() {
           name: '类目浏览',
           type: 'bar',
           barCategoryGap: '48%',
-          itemStyle: { color: theme.categorical[2], borderRadius: [0, 4, 4, 0] },
+          itemStyle: { color: theme.categorical[2] },
           label: { show: false },
           data: chartRows.map((row, index) => ({
             value: row.view_cnt,
@@ -252,7 +252,7 @@ export default function ItemsPage() {
             data: points.map((point) => point[item.key]),
             showSymbol: false,
             symbol: 'none',
-            lineStyle: { width: 2, color },
+            lineStyle: { width: 2.4, color },
             itemStyle: { color },
             emphasis: { focus: 'series' },
           },
@@ -286,6 +286,14 @@ export default function ItemsPage() {
 
   return (
     <div className="page-stack">
+      <section className="analysis-callout">
+        <p className="eyebrow">IDENTIFIER NOTE</p>
+        <p>
+          <strong>商品编号来自 Retailrocket 原始数据，不是界面生成的代号。</strong>{' '}
+          原始数据集不提供商品名称，因此图表与 tooltip 只显示 itemid / categoryid。点顶栏「来源」可查看数据集、许可证与校验信息。
+        </p>
+      </section>
+
       <div className="grid-2">
         <ChartCard
           title="Top 20 商品"

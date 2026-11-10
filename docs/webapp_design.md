@@ -1,4 +1,4 @@
-# Phase 11 — Web UI 设计文档（只读展示层）
+# Phase 11 — Web UI 设计文档（只读展示 + 本地分析沙箱）
 
 > 实施契约：Web UI SPEC v1（冻结）。本文记录 Web UI 的架构、API 契约、
 > `webapp_ro` 权限模型、部署/运行方式与失败排查。前端由独立目录
@@ -300,8 +300,60 @@ cd web/backend
 
 `/api/*` 由路由处理；未知 `/api/*` 返回 404 JSON。其余路径优先命中
 `WEB_STATIC_DIR` 下的真实文件，未命中则回落到 `index.html`，支持
-`/items`、`/retention`、`/realtime`、`/quality` 直接刷新。前端未构建时返回
-内置占位页（200），方便后端联调。
+`/items`、`/retention`、`/realtime`、`/quality`、`/analyze`、`/model`
+直接刷新。前端未构建时返回内置占位页（200），方便后端联调。
+
+`/realtime` 当前不出现在侧栏导航：页面与 `/api/realtime` 保留，但尚未接入新的实时
+数据源，只作为内部批流验证视图，从 `/model` 页进入；等实时链路真正落地后再恢复入口。
+
+### 5.5 上传分析沙箱（不写 MySQL）
+
+只读看板之外，`/analyze` 提供轻量的上传分析链路：用户上传 CSV / Excel，服务端探测
+列名与样本值给出字段映射，用户确认后进入单 worker 队列，在任务级 DuckDB 中完成
+解析、规范化与聚合。原始文件、`normalized.csv`、`analysis.duckdb`、`result.json`
+全部落在 `ANALYSIS_DATA_DIR/<job_id>/`，按 TTL（默认 168h）清理；分析全程不接触
+MySQL 连接，也不修改既有四层仓库与 139 天基线。
+
+**页面路由**
+
+| 路由 | 作用 |
+| --- | --- |
+| `/analyze` | 上传、示例数据、最近任务 |
+| `/analyze/:jobId` | 字段映射确认、进度与预计剩余时间、失败/取消重试 |
+| `/analyze/:jobId/result` | 结果看板、数据质量、来源与字段可用性 |
+| `/model` | 四层批流模型与上传沙箱的说明页 |
+
+**API**
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| POST | `/api/analysis/uploads` | 上传 CSV / XLSX，返回 `awaiting_mapping` 与字段探测 |
+| POST | `/api/analysis/sample` | 创建 14 天、275,404 行的示例任务 |
+| GET | `/api/analysis/jobs?limit=` | 最近任务列表 |
+| GET | `/api/analysis/jobs/{id}` | 任务状态、进度、探测与映射 |
+| POST | `/api/analysis/jobs/{id}/start` | 确认映射并启动；`failed` / `cancelled` 可重试 |
+| GET | `/api/analysis/jobs/{id}/result` | 完成后的结果快照（未完成返回 409） |
+| DELETE | `/api/analysis/jobs/{id}` | 删除任务目录；运行中先请求取消 |
+
+**两层层级模型**：`fact_events` 保存规范化事件（view / add_to_cart / transaction /
+other），`agg_daily`、`agg_funnel`、`agg_retention`、`agg_item`、`agg_category`、
+`agg_quality` 由它派生。必填映射为用户、商品、事件类型、事件时间；订单号、类目、
+金额、商品名可选，缺失时对应指标自动降级而不是中断。
+
+**上限与并发**：单文件 200MB、500 万行、单 worker、队列 20；进度按已处理行数与
+rows/sec EWMA 估算，前端倒计时每次轮询用 `eta_seconds` 重新校准。
+
+**完成转场**：任务页看到运行态后完成，跳转带 `reveal` 标记（`location.state` 与
+`analysis-reveal:{job_id}` 双通道，后者保证刷新/拦截时仍能触发）。结果页在已渲染的
+内容上播放「案卷展开」——两扇门板从合拢向两侧退开，结果内容同步上浮；路由切换本身
+用 `document.startViewTransition` 做短交叉淡入，不支持时退回普通导航。
+`prefers-reduced-motion` 时不推门，只用一层墨色帷幕短淡出。直接打开已完成任务或刷新
+结果页不会重播。
+
+**彩蛋**：`MagpiePet` 全局挂载一只喜鹊，分析页停在绯红面板上随机走动/啄食，离开页面
+飞回侧栏鸟窝（品牌图标已改为鸟窝）；回到分析页时随机选择直飞、掉落再飞、绕路再飞三种
+落回方式，点击它会飞出去玩一圈再回来。飞行用 Web Animations，页面隐藏时以超时兜底
+落位，减少动态模式下不飞行。
 
 ## 6. 错误处理与响应约定
 
@@ -332,6 +384,9 @@ cd web/backend
 ```bash
 # 新后端测试（真实本地库、只读账号；含已知值断言与只读权限断言）
 .venv/Scripts/python.exe -m pytest web/backend/tests -q
+
+# 上传分析沙箱（字段探测 / 规范化 / 管道 / API 重试）
+.venv/Scripts/python.exe -m pytest tests/unit/test_analysis_*.py -q
 
 # 现有测试零回归
 .venv/Scripts/python.exe -m pytest tests/unit -q

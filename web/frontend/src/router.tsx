@@ -7,6 +7,10 @@ const ItemsPage = lazy(() => import('./pages/Items'))
 const RetentionPage = lazy(() => import('./pages/Retention'))
 const RealtimePage = lazy(() => import('./pages/Realtime'))
 const QualityPage = lazy(() => import('./pages/Quality'))
+const AnalyzePage = lazy(() => import('./pages/Analyze'))
+const AnalyzeJobPage = lazy(() => import('./pages/AnalyzeJob'))
+const AnalyzeResultPage = lazy(() => import('./pages/AnalyzeResult'))
+const DataModelPage = lazy(() => import('./pages/DataModel'))
 
 function NotFoundPage() {
   return (
@@ -29,6 +33,10 @@ export function AppRoutes() {
         <Route path="/retention" element={<RetentionPage />} />
         <Route path="/realtime" element={<RealtimePage />} />
         <Route path="/quality" element={<QualityPage />} />
+        <Route path="/analyze" element={<AnalyzePage />} />
+        <Route path="/analyze/:jobId" element={<AnalyzeJobPage />} />
+        <Route path="/analyze/:jobId/result" element={<AnalyzeResultPage />} />
+        <Route path="/model" element={<DataModelPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </Suspense>

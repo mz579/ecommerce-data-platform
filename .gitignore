@@ -46,3 +46,7 @@ docker/flink/lib/*.jar.tmp
 *.swp
 .DS_Store
 Thumbs.db
+
+# ---------- 本地工具 / 规划稿 ----------
+.claude/
+docs/superpowers/

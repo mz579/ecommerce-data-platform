@@ -5,33 +5,39 @@
 export type ThemeMode = 'light' | 'dark'
 
 export const categoricalLight = [
-  '#2a78d6',
-  '#eb6834',
-  '#1baf7a',
-  '#eda100',
-  '#e87ba4',
-  '#008300',
-  '#6250d6',
-  '#e34948',
+  '#b3002e',
+  '#1f1d1b',
+  '#7a7269',
+  '#d46a6a',
+  '#4a4540',
+  '#9e8e85',
+  '#8c1d2f',
+  '#c9bfb5',
 ] as const
 
 export const categoricalDark = [
-  '#3987e5',
-  '#d95926',
-  '#199e70',
-  '#c98500',
-  '#d55181',
-  '#008300',
-  '#9085e9',
-  '#e66767',
+  '#c41e3a',
+  '#d7d6d4',
+  '#8a7f7c',
+  '#e0727f',
+  '#6e1a2a',
+  '#a8a29a',
+  '#f2ede4',
+  '#5a5550',
 ] as const
 
+/** 转化率图里的两条折线：与绯红主题区分开的蓝 / 绿。 */
+export const rateLineColors = {
+  light: ['#1d4ed8', '#047857'],
+  dark: ['#3b82f6', '#34d399'],
+} as const
+
 export const statusColors = {
-  good: '#0ca30c',
-  warning: '#fab219',
-  serious: '#ec835a',
-  critical: '#d03b3b',
-  neutral: '#898781',
+  good: '#7d9468',
+  warning: '#c9a24a',
+  serious: '#c06a3e',
+  critical: '#c33241',
+  neutral: '#8a8179',
 } as const
 
 export interface ChartTheme {
@@ -54,36 +60,36 @@ export interface ChartTheme {
 
 const lightTheme: ChartTheme = {
   mode: 'light',
-  page: '#f9f9f7',
-  surface: '#fcfcfb',
-  textPrimary: '#0b0b0b',
-  textSecondary: '#52514e',
-  textMuted: '#898781',
-  grid: '#e1e0d9',
-  axis: '#c3c2b7',
-  border: 'rgba(11,11,11,0.10)',
+  page: '#d9d5ce',
+  surface: '#e8e4dc',
+  textPrimary: '#08080a',
+  textSecondary: '#332e2a',
+  textMuted: '#5c544c',
+  grid: '#c7c0b6',
+  axis: '#9a9187',
+  border: 'rgba(8,8,10,0.16)',
   categorical: categoricalLight,
-  sequential: ['#cde2fb', '#9bc4ee', '#5f96cf', '#2f5f9e', '#0d366b'],
-  tooltipBg: '#fcfcfb',
-  tooltipBorder: 'rgba(11,11,11,0.16)',
+  sequential: ['#e3d9d3', '#c9a9a5', '#b5707a', '#8c1d2f', '#4a0a16'],
+  tooltipBg: '#e8e4dc',
+  tooltipBorder: 'rgba(8,8,10,0.32)',
   status: statusColors,
 }
 
 const darkTheme: ChartTheme = {
   mode: 'dark',
-  page: '#0d0d0d',
-  surface: '#1a1a19',
-  textPrimary: '#f0efec',
-  textSecondary: '#c3c2b7',
-  textMuted: '#898781',
-  grid: '#2c2c2a',
-  axis: '#383835',
-  border: 'rgba(240,239,236,0.12)',
+  page: '#08080a',
+  surface: '#0f0f12',
+  textPrimary: '#f4f1eb',
+  textSecondary: '#d0c9bf',
+  textMuted: '#9a938a',
+  grid: '#302e36',
+  axis: '#4a4650',
+  border: 'rgba(215,214,212,0.14)',
   categorical: categoricalDark,
-  // 深色下保持同一蓝色单色相：低值贴近表面，高值提亮
-  sequential: ['#1b2c3f', '#21486f', '#2e6ca8', '#4f93d4', '#8bc0f2'],
-  tooltipBg: '#1a1a19',
-  tooltipBorder: '#383835',
+  // 墨黑底上的绯红单色阶：低值贴近表面，高值提亮
+  sequential: ['#2a0a12', '#4a101c', '#7a1a2e', '#b3002e', '#e88a96'],
+  tooltipBg: '#0f0f12',
+  tooltipBorder: '#d7d6d4',
   status: statusColors,
 }
 
@@ -92,4 +98,4 @@ export function getChartTheme(mode: ThemeMode): ChartTheme {
 }
 
 export const fontFamily =
-  'system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif'
+  '"Segoe UI", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif'

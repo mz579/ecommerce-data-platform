@@ -30,7 +30,7 @@ packages = ["src/ecommerce_dw"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-pythonpath = ["src"]
+pythonpath = ["src", "web/backend"]
 
 [tool.ruff]
 line-length = 100
