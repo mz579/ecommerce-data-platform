@@ -14,7 +14,7 @@ import { fontFamily, getChartTheme } from '../theme/tokens'
 import { useThemeMode } from '../theme/ThemeContext'
 import { formatInt, formatPct, shiftDate } from '../utils/format'
 
-const MAX_VISIBLE_COHORTS = 30
+const MAX_VISIBLE_COHORTS = 20
 
 function cohortStatus(cohort: RetentionCohort): string {
   return (cohort.window_status ?? 'full').toLowerCase()
@@ -27,7 +27,7 @@ function tooltipBase(theme: ReturnType<typeof getChartTheme>) {
     borderWidth: 1,
     padding: [8, 10],
     textStyle: { color: theme.textPrimary, fontSize: 12, fontFamily },
-    extraCssText: 'border-radius:8px;box-shadow:none;',
+    extraCssText: 'border-radius:0;box-shadow:none;',
   }
 }
 
@@ -271,7 +271,7 @@ export default function RetentionPage() {
           data: series.map((point) => point.d1_rate),
           showSymbol: false,
           symbol: 'none',
-          lineStyle: { width: 2 },
+          lineStyle: { width: 2.4 },
           emphasis: { focus: 'series' },
           markLine:
             weighted !== null && weighted !== undefined
@@ -357,8 +357,10 @@ export default function RetentionPage() {
   if (!data) return null
 
   const hasCohorts = visibleCohorts.length > 0
-  const heatmapHeight = Math.min(680, Math.max(300, visibleCohorts.length * 22 + 60))
+  const heatmapHeight = Math.min(520, Math.max(280, visibleCohorts.length * 20 + 60))
   const maxAgeDay = ageDays[ageDays.length - 1] ?? 0
+  // 当前 ADS 只有 D0 / D1：两列热力图会显得又高又空，直接用 D1 曲线表达。
+  const singleAgeDay = maxAgeDay <= 1
   const heatmapFooter = [
     'D0 恒为 100%，仅作 cohort 基数参考；色阶按非 D0 留存率标定。',
     '* 为 cohort 级窗口不完整；D1 行级状态见曲线 * 与 tooltip。',
@@ -369,30 +371,36 @@ export default function RetentionPage() {
 
   return (
     <div className="page-stack">
-      <ChartCard
-        title="Cohort 留存热力图"
-        subtitle={
-          hasCohorts
-            ? `行 = cohort 日期，列 = age_day 0-${maxAgeDay}；展示区间内最近 ${visibleCohorts.length} 个 cohort（共 ${data.cohorts.length} 个）`
-            : '行 = cohort 日期，列 = age_day'
-        }
-        footer={heatmapFooter}
-      >
-        {hasCohorts ? (
-          <Chart
-            option={heatmapOption}
-            height={heatmapHeight}
-            ariaLabel="Cohort 次日留存热力图"
-          />
-        ) : (
-          <EmptyState />
-        )}
-      </ChartCard>
+      {!singleAgeDay ? (
+        <ChartCard
+          title="Cohort 留存热力图"
+          subtitle={
+            hasCohorts
+              ? `行 = cohort 日期，列 = age_day 0-${maxAgeDay}；展示区间内最近 ${visibleCohorts.length} 个 cohort（共 ${data.cohorts.length} 个）`
+              : '行 = cohort 日期，列 = age_day'
+          }
+          footer={heatmapFooter}
+        >
+          {hasCohorts ? (
+            <Chart
+              option={heatmapOption}
+              height={heatmapHeight}
+              ariaLabel="Cohort 留存热力图"
+            />
+          ) : (
+            <EmptyState />
+          )}
+        </ChartCard>
+      ) : null}
 
       <div className="grid-2">
         <ChartCard
           title="D1 留存曲线（逐 cohort）"
-          subtitle="逐 cohort 的次日留存率；虚线为区间加权 D1（Σretained / Σcohort_size）"
+          subtitle={
+            singleAgeDay
+              ? '当前 ADS 只提供 D1，使用曲线代替两列热力图；D0 恒为 100%，不再单独占一列'
+              : '逐 cohort 的次日留存率；虚线为区间加权 D1（Σretained / Σcohort_size）'
+          }
           footer="曲线上的 * 表示该日 D1 行 window_status=partial（优先取 d1_series.window_status，缺失回退 cohort 级），不参与加权；曲线末端下降不代表真实留存恶化。"
         >
           {data.d1_series.length > 0 ? (

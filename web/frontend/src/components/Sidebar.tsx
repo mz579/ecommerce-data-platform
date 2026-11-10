@@ -1,14 +1,23 @@
 import { NavLink } from 'react-router-dom'
 import { useDateRange } from '../state/DateRangeContext'
-import { BrandMark, IconItems, IconOverview, IconQuality, IconRealtime, IconRetention } from './Icons'
+import {
+  IconAnalyze,
+  IconItems,
+  IconModel,
+  IconOverview,
+  IconQuality,
+  IconRetention,
+  NestMark,
+} from './Icons'
 import { StatusPill } from './StatusPill'
 
 const NAV_ITEMS = [
   { to: '/', label: '总览', en: 'Overview', icon: IconOverview, end: true },
   { to: '/items', label: '商品', en: 'Items', icon: IconItems, end: false },
   { to: '/retention', label: '留存', en: 'Retention', icon: IconRetention, end: false },
-  { to: '/realtime', label: '实时', en: 'Realtime', icon: IconRealtime, end: false },
   { to: '/quality', label: '质量', en: 'Quality', icon: IconQuality, end: false },
+  { to: '/analyze', label: '分析', en: 'Analyze', icon: IconAnalyze, end: false },
+  { to: '/model', label: '模型', en: 'Model', icon: IconModel, end: true },
 ]
 
 export function Sidebar() {
@@ -17,8 +26,8 @@ export function Sidebar() {
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        <span className="brand-mark">
-          <BrandMark />
+        <span className="brand-mark" data-magpie-nest>
+          <NestMark />
         </span>
         <div className="brand-copy">
           <div className="brand-name">电商数仓</div>

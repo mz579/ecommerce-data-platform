@@ -400,9 +400,19 @@ services:
       WEB_DB_PASSWORD: ${WEB_DB_PASSWORD}
       WEB_STATIC_DIR: /app/static
       WEB_LOG_LEVEL: ${WEB_LOG_LEVEL:-INFO}
+      # 上传分析沙箱：命名卷持久化，单 worker；不写 MySQL。
+      ANALYSIS_DATA_DIR: /app/analysis
+      ANALYSIS_MAX_UPLOAD_MB: ${ANALYSIS_MAX_UPLOAD_MB:-200}
+      ANALYSIS_MAX_ROWS: ${ANALYSIS_MAX_ROWS:-5000000}
+      ANALYSIS_JOB_TTL_HOURS: ${ANALYSIS_JOB_TTL_HOURS:-168}
+      ANALYSIS_WORKERS: ${ANALYSIS_WORKERS:-1}
+      ANALYSIS_QUEUE_MAX: ${ANALYSIS_QUEUE_MAX:-20}
+      ANALYSIS_SAMPLE_ENABLED: ${ANALYSIS_SAMPLE_ENABLED:-true}
       TZ: UTC
     ports:
       - "${WEB_UI_PORT:-8090}:8090"
+    volumes:
+      - analysis_data:/app/analysis
     depends_on:
       mysql:
         condition: service_healthy
@@ -427,6 +437,7 @@ volumes:
   kafka_data:
   flink_checkpoints:
   flink_savepoints:
+  analysis_data:
 
 networks:
   ecommerce-net:

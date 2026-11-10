@@ -19,6 +19,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from . import db
+from .analysis.router import AnalysisRuntime
+from .analysis.router import router as analysis_router
 from .config import settings
 from .routers import items, meta, ops, overview, quality, realtime, retention
 
@@ -56,9 +58,9 @@ PLACEHOLDER_HTML = """<!doctype html>
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info(
-        "web backend starting: mysql=%s:%s user=%s dw=%s rt=%s pool=%s static=%s",
+        "web backend starting: mysql=%s:%s user=%s dw=%s rt=%s pool=%s static=%s analysis=%s",
         settings.mysql_host,
         settings.mysql_port,
         settings.mysql_user,
@@ -66,16 +68,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         settings.rt_database,
         settings.pool_size,
         settings.static_dir,
+        settings.analysis_data_dir,
     )
-    yield
-    db.POOL.close_all()
-    logger.info("web backend stopped")
+    analysis_runtime = AnalysisRuntime.create(settings)
+    app.state.analysis = analysis_runtime
+    analysis_runtime.startup()
+    try:
+        yield
+    finally:
+        analysis_runtime.shutdown()
+        db.POOL.close_all()
+        logger.info("web backend stopped")
 
 
 app = FastAPI(
     title="电商数仓 Web UI API",
     version="1.0.0",
-    description="只读展示层：ADS 报表、实时结果、质量门禁与运维信息。",
+    description="只读看板 + 上传式分析沙箱：ADS 报表、实时结果、质量门禁与文件分析。",
     lifespan=lifespan,
 )
 
@@ -87,6 +96,7 @@ for api_router in (
     realtime.router,
     quality.router,
     ops.router,
+    analysis_router,
 ):
     app.include_router(api_router, prefix="/api")
 

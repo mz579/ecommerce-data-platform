@@ -273,10 +273,20 @@ docker compose exec airflow-scheduler airflow dags trigger ecommerce_daily_pipel
 - 8 张真实渲染截图在 `dashboards/screenshots/`，截图脚本带硬断言（任何 `Waiting on` / `No results` → exit 1）。
 - 刷新链路：`publish` 追加 `ads_publish_log` → `v_ads_publish_status` 计数 +1 → 商品分析看板“累计发布次数” KPI +1。
 
-### 7.4 Web UI（Phase 11，只读）
+### 7.4 Web UI（Phase 11，只读 + 本地分析沙箱）
 
 面向 ADS 报表 / 实时结果 / 质量与运维的一体化只读界面：FastAPI 提供 `/api/*`，
 同一容器托管 React SPA；业务连接固定使用只读账号 `webapp_ro`（仅 SELECT）。
+
+`/analyze` 另提供上传分析：CSV / Excel 经字段识别与人工确认后，由单 worker 在
+`ANALYSIS_DATA_DIR` 下的独立 DuckDB 中解析、规范化并聚合；原始文件、`normalized.csv`、
+`analysis.duckdb`、`result.json` 只写任务目录并按 TTL 清理，**不写 MySQL**。`/model`
+页解释四层批处理数仓与上传沙箱的关系。
+
+上传区与英雄区分离，「开始分析 → 结果」使用案卷展开式转场（View Transitions 做路由
+交叉淡入，`prefers-reduced-motion` 时退化为短淡出）。批流对账页 `/realtime` 仍保留
+接口和页面，但当前**没有接入新的实时数据源**，侧栏入口暂时收起，只作为内部验证视图
+从 `/model` 进入。
 
 ```bash
 # 1) 幂等创建/同步只读账号（读 .env 的 WEB_DB_USER / WEB_DB_PASSWORD）
@@ -294,7 +304,7 @@ wsl -d Ubuntu24.04 -- bash -lc "cd /mnt/c/Zproject/data-engineering/ecommerce-da
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
-| 宿主全量测试 | `python -m pytest` | **280 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
+| 宿主全量测试 | `python -m pytest` | **314 passed, 1 skipped**（skip = 宿主无 Airflow 时整模块跳过 DAG 测试） |
 | DAG 契约测试 | `docker compose exec -T airflow-scheduler python -m pytest tests/dag` | **5 passed** |
 | 代码规范 | `ruff check . && ruff format --check .` | 全绿 |
 | 一键端到端演示 | `python scripts/demo_phase8.py` | 8 步通过，约 **4.2s**，生产 13 张表行数不变 |

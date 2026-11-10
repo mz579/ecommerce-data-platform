@@ -63,6 +63,21 @@ class Settings:
     read_timeout: int
     static_dir: Path
     log_level: str
+    # ---- 上传分析沙箱（Phase 11.1）----
+    analysis_data_dir: Path
+    analysis_max_upload_mb: int
+    analysis_max_rows: int
+    analysis_job_ttl_hours: int
+    analysis_workers: int
+    analysis_queue_max: int
+    analysis_sample_enabled: bool
+
+
+def _env_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
@@ -84,6 +99,13 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         read_timeout=_env_int(env, "WEB_DB_READ_TIMEOUT", 30),
         static_dir=_env_path(env, "WEB_STATIC_DIR", PROJECT_ROOT / "web" / "frontend" / "dist"),
         log_level=(env.get("WEB_LOG_LEVEL") or "INFO").upper(),
+        analysis_data_dir=_env_path(env, "ANALYSIS_DATA_DIR", PROJECT_ROOT / "build" / "analysis"),
+        analysis_max_upload_mb=_env_int(env, "ANALYSIS_MAX_UPLOAD_MB", 200),
+        analysis_max_rows=_env_int(env, "ANALYSIS_MAX_ROWS", 5_000_000),
+        analysis_job_ttl_hours=_env_int(env, "ANALYSIS_JOB_TTL_HOURS", 168),
+        analysis_workers=max(1, _env_int(env, "ANALYSIS_WORKERS", 1)),
+        analysis_queue_max=max(1, _env_int(env, "ANALYSIS_QUEUE_MAX", 20)),
+        analysis_sample_enabled=_env_bool(env, "ANALYSIS_SAMPLE_ENABLED", True),
     )
 
 

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { apiUrl } from '../api/client'
 import { useApi } from '../api/useApi'
 import type { RealtimeResponse, RealtimeTable, ReconcileRow } from '../api/types'
@@ -221,6 +222,19 @@ export default function RealtimePage() {
 
   return (
     <div className="page-stack">
+      <section className="analysis-callout">
+        <p className="eyebrow">BATCH / STREAM RECONCILIATION · INTERNAL</p>
+        <p>
+          <strong>批流对账页暂时是内部验证视图，没有接入新的实时数据源。</strong>{' '}
+          这里展示的 rt_* 表来自项目自带的 Kafka → Flink 回放结果，用来验证实时作业与离线 ADS
+          日聚合是否同口径。差异 = 实时 − 离线，0 表示一致；SKIP 表示部分日或该指标当前不可比。
+          页面和接口保留下来，等实时链路真正落地后再逐步完善；导航入口暂时收起。
+          <Link className="link-button" to="/model" style={{ marginLeft: 10 }}>
+            查看数据模型
+          </Link>
+        </p>
+      </section>
+
       <div className="rt-grid">
         {data.tables.length > 0 ? (
           data.tables.map((table) => <RealtimeTableCard key={table.table} table={table} />)
@@ -233,7 +247,7 @@ export default function RealtimePage() {
 
       <section>
         <div className="section-head">
-          <h2 className="section-title">对账汇总</h2>
+          <h2 className="section-title">批流对账汇总</h2>
           <span className="page-note">
             {checkedAt ? `对账时间 ${formatDateTime(checkedAt)} UTC` : '对账时间 —'}
           </span>
@@ -281,7 +295,7 @@ export default function RealtimePage() {
       <section className="card ops-card">
         <div className="section-head">
           <div>
-            <h2 className="section-title">离线 vs 实时对比</h2>
+            <h2 className="section-title">离线 ADS vs 实时 rt</h2>
             <p className="page-note">
               最近 {compareDates} 个已对账日期 · {metrics.length} 个指标；差异 = 实时 − 离线
             </p>

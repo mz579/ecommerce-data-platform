@@ -72,8 +72,12 @@ COPY web/backend/app ./app
 COPY --from=frontend-build /build/web/frontend/dist ./static
 
 RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/analysis \
     && chown -R appuser:appuser /app
 USER appuser
+
+# 上传分析沙箱：compose 会把命名卷挂到这里；目录必须对 appuser 可写。
+VOLUME ["/app/analysis"]
 
 EXPOSE 8090
 

@@ -18,16 +18,16 @@ interface ThemeValue {
 const STORAGE_KEY = 'ecom-theme'
 
 const ThemeContext = createContext<ThemeValue>({
-  mode: 'light',
+  mode: 'dark',
   toggle: () => undefined,
   setMode: () => undefined,
 })
 
 function readInitialMode(): ThemeMode {
   try {
-    return localStorage.getItem(STORAGE_KEY) === 'dark' ? 'dark' : 'light'
+    return localStorage.getItem(STORAGE_KEY) === 'light' ? 'light' : 'dark'
   } catch {
-    return 'light'
+    return 'dark'
   }
 }
 
@@ -38,7 +38,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     document.documentElement.setAttribute('data-theme', mode)
     document
       .querySelector('meta[name="theme-color"]')
-      ?.setAttribute('content', mode === 'dark' ? '#0d0d0d' : '#f9f9f7')
+      ?.setAttribute('content', mode === 'dark' ? '#08080A' : '#D9D5CE')
     try {
       localStorage.setItem(STORAGE_KEY, mode)
     } catch {
